@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import traceback
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, Optional
 
@@ -205,7 +206,11 @@ async def execute_job(job_id: Optional[str], rows: Optional[list[VaSearchRow]]):
         async with sem:
             await scrape_one_row(row, job_id=job_id, headless=cfg.headless)
 
-    await asyncio.gather(*(run_one(r) for r in rows))
+    try:
+        await asyncio.gather(*(run_one(r) for r in rows))
+    except Exception:
+        # Log without re-raising: Starlette background tasks otherwise surface as ASGI errors after 200 OK.
+        traceback.print_exc()
 
 
 async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool):
@@ -256,13 +261,28 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
         else:
             await page.keyboard.press("Enter")
 
+        # jQuery UI leaves the court autocomplete <ul> open; it intercepts clicks on sidebar links.
+        await court_input.blur()
+        await page.keyboard.press("Escape")
+        overlay = page.locator("ul.ui-autocomplete.ui-menu:visible, ul.ui-menu.ui-widget:visible").first
+        if await safe_is_visible(overlay):
+            await page.keyboard.press("Escape")
+            try:
+                await overlay.wait_for(state="hidden", timeout=5_000)
+            except Exception:
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(400)
+
         # Click correct Name Search (division T or V).
         division = "V" if row.type == "civil" else "T"
         link = page.locator(
             f'a[name="moduleLink"][href*="nameSearch.do"][href*="searchDivision={division}"]'
         ).first
         await link.wait_for(state="visible")
-        await link.click()
+        try:
+            await link.click(timeout=15_000)
+        except Exception:
+            await link.click(force=True, timeout=15_000)
         await page.wait_for_load_state("domcontentloaded")
 
         # Fill search fields + submit.
