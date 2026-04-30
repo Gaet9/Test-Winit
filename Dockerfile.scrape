@@ -1,6 +1,6 @@
 # Long-running scrape worker for Render (Node + Playwright + same TS script as local).
 # Render: Web Service → Docker, repo root, Dockerfile path `Dockerfile.scrape`.
-# Env: WORKER_WEBHOOK_SECRET, NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PORT (set by Render).
+# Env: WORKER_WEBHOOK_SECRET, SUPABASE_SERVICE_ROLE_KEY, and either NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL (Render often uses SUPABASE_URL). PORT is set by Render.
 
 FROM mcr.microsoft.com/playwright:v1.59.0-noble
 

@@ -9,7 +9,7 @@
 
 import { randomUUID, timingSafeEqual } from "node:crypto"
 import { spawn } from "node:child_process"
-import { writeFileSync } from "node:fs"
+import { existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import http from "node:http"
@@ -17,6 +17,17 @@ import Papa from "papaparse"
 
 const SECRET = process.env.WORKER_WEBHOOK_SECRET?.trim()
 const PORT = Number(process.env.PORT || 8787)
+
+function logSupabaseEnvHint() {
+  const url =
+    process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() || process.env.SUPABASE_URL?.trim() || ""
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || ""
+  if (!url || !key) {
+    console.warn(
+      "[render-scrape-webhook] Supabase not fully configured (need NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY). Scraping may run but job progress in the app will stay at 0%."
+    )
+  }
+}
 
 type Row = { firstName: string; lastName: string; court: string; type: "civil" | "traffic/criminal" }
 
@@ -105,18 +116,33 @@ const server = http.createServer(async (req, res) => {
 
   const cwd = process.cwd()
   const scriptPath = join(cwd, "scripts", "va-gdcourts-scrape.playwright.ts")
-  const args = ["tsx", scriptPath, "--csv", csvPath, "--name", body.name, "--job-id", body.job_id, outPath]
+  const cliArgs = ["--csv", csvPath, "--name", body.name, "--job-id", body.job_id, outPath]
+  const tsxCli = join(cwd, "node_modules", "tsx", "dist", "cli.mjs")
+  const useNodeTsx = existsSync(tsxCli)
+
+  console.log(
+    `[render-scrape-webhook] POST /run accepted job_id=${body.job_id} rows=${body.rows.length} spawn=${useNodeTsx ? "node+tsx" : "npx"}`
+  )
 
   try {
-    const child = spawn("npx", args, {
-      cwd,
-      env: process.env,
-      detached: true,
-      stdio: "ignore",
-      shell: process.platform === "win32",
-    })
+    const child = useNodeTsx
+      ? spawn(process.execPath, [tsxCli, scriptPath, ...cliArgs], {
+          cwd,
+          env: process.env,
+          detached: true,
+          stdio: "ignore",
+        })
+      : spawn("npx", ["tsx", scriptPath, ...cliArgs], {
+          cwd,
+          env: process.env,
+          detached: true,
+          stdio: "ignore",
+          shell: process.platform === "win32",
+        })
     child.unref()
-    child.on("error", () => {})
+    child.on("error", (err) => {
+      console.error("[render-scrape-webhook] child spawn error:", err)
+    })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     res.writeHead(500, { "Content-Type": "application/json" })
@@ -129,5 +155,6 @@ const server = http.createServer(async (req, res) => {
 })
 
 server.listen(PORT, "0.0.0.0", () => {
+  logSupabaseEnvHint()
   console.log(`[render-scrape-webhook] listening on 0.0.0.0:${PORT}`)
 })

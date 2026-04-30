@@ -45,8 +45,9 @@ Use this when the Next app on **Vercel** calls `RENDER_WORKER_URL` with `POST /r
 
 - Repo root on Render, **Dockerfile path**: `Dockerfile.scrape` (see repo root).
 - Env on Render:
-    - `WORKER_WEBHOOK_SECRET` (same value as on Vercel)
-    - `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (worker runs `scripts/va-gdcourts-scrape.playwright.ts`)
+  - `WORKER_WEBHOOK_SECRET` (same value as on Vercel)
+  - `SUPABASE_SERVICE_ROLE_KEY`
+  - **Project URL:** `NEXT_PUBLIC_SUPABASE_URL` **or** `SUPABASE_URL` (if only `SUPABASE_URL` was set before, progress stayed at 0% — the TS worker now accepts both)
 - **Vercel** env: `RENDER_WORKER_URL` = `https://<your-service>.onrender.com` (no `/run` suffix), same `WORKER_WEBHOOK_SECRET`.
 - Health: `GET /health` on the service.
 

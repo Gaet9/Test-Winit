@@ -38,6 +38,7 @@ import {
   insertScrapeJob,
   updateScrapeJob,
 } from "@/lib/scrape-job-worker"
+import { resolveSupabaseProjectUrl, resolveSupabaseServiceRoleKey } from "@/lib/supabase/worker-env"
 import type { LineProgressState } from "@/types/scrape-result-line"
 
 type SearchType = "civil" | "traffic/criminal"
@@ -407,11 +408,11 @@ export async function persistWorkerScrapeRunToSupabase(options: {
   lineCount: number
   results: CaseExport[]
 }) {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const url = resolveSupabaseProjectUrl()
+  const key = resolveSupabaseServiceRoleKey()
   if (!url || !key) {
     console.warn(
-      "[worker] NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing; skip DB insert."
+      "[worker] Supabase URL or service role key missing (set NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL, plus SUPABASE_SERVICE_ROLE_KEY); skip DB insert."
     )
     return
   }
@@ -476,10 +477,16 @@ async function main() {
     process.exit(1)
   }
   const rows = loadVaRowsFromCsvPath(csvPath)
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const url = resolveSupabaseProjectUrl()
+  const key = resolveSupabaseServiceRoleKey()
   const supabase =
     !skipSupabase && url && key ? createClient(url, key) : null
+
+  if (existingJobId && !supabase) {
+    console.error(
+      "[worker] --job-id was passed but Supabase is not configured. Set NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY so job progress can update (otherwise the UI stays at 0%)."
+    )
+  }
 
   let jobId: string | undefined
   if (supabase) {

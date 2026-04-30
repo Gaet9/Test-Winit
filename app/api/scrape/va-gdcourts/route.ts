@@ -41,6 +41,7 @@ async function forwardToRemoteWorker(jobId: string, name: string, rows: z.infer<
       Authorization: `Bearer ${secret}`,
     },
     body: JSON.stringify({ job_id: jobId, name, rows }),
+    signal: AbortSignal.timeout(45_000),
   })
   const text = await res.text()
   if (!res.ok) {

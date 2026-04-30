@@ -29,12 +29,17 @@ function badgeVariant(state: string): "default" | "secondary" | "destructive" | 
   return "outline"
 }
 
-export function HomeResultsTable() {
+export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } = {}) {
   const [archive, setArchive] = React.useState<ScrapeResultLineRow[]>([])
   const [configured, setConfigured] = React.useState(true)
   const [liveJob, setLiveJob] = React.useState<WorkerScrapeJobRow | null>(null)
   const [jobIdOverride, setJobIdOverride] = React.useState("")
   const [sseStatus, setSseStatus] = React.useState<"idle" | "open" | "closed">("idle")
+
+  React.useEffect(() => {
+    const id = focusJobId?.trim()
+    if (id) setJobIdOverride(id)
+  }, [focusJobId])
 
   const load = React.useCallback(async () => {
     const res = await fetch("/api/scrape-results", { cache: "no-store" })
@@ -117,7 +122,11 @@ export function HomeResultsTable() {
             onChange={(e) => setJobIdOverride(e.target.value)}
           />
           <p className="text-xs text-muted-foreground">
-            SSE: {sseStatus}. Defaults to latest active job when the field is empty.
+            SSE: {sseStatus}. Empty field = latest incomplete job in Supabase; after Start scraping the new job id is
+            filled automatically. If progress stays 0%, check Render logs and that the worker has{" "}
+            <span className="font-mono">SUPABASE_URL</span> or{" "}
+            <span className="font-mono">NEXT_PUBLIC_SUPABASE_URL</span> plus{" "}
+            <span className="font-mono">SUPABASE_SERVICE_ROLE_KEY</span>.
           </p>
         </div>
         <Button type="button" variant="outline" onClick={() => void load()}>

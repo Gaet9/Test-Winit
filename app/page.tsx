@@ -28,6 +28,7 @@ export default function Home() {
     const [csvError, setCsvError] = React.useState<string | null>(null);
     const [dragActive, setDragActive] = React.useState(false);
     const [starting, setStarting] = React.useState(false);
+    const [sseFocusJobId, setSseFocusJobId] = React.useState<string | null>(null);
     const fileInputRef = React.useRef<HTMLInputElement>(null);
 
     const total = csvRows.length;
@@ -89,6 +90,7 @@ export default function Home() {
                     : `Request failed (${res.status})`;
                 throw new Error(msg);
             }
+            if (data.jobId) setSseFocusJobId(data.jobId);
             toast.success("Scraping started", {
                 description: data.jobId ? `Job ${data.jobId.slice(0, 8)}… — open Results for live updates.` : undefined,
             });
@@ -295,7 +297,7 @@ export default function Home() {
                                 </CardDescription>
                             </CardHeader>
                             <CardContent>
-                                <HomeResultsTable />
+                                <HomeResultsTable focusJobId={sseFocusJobId} />
                             </CardContent>
                             <CardFooter className='justify-between'>
                                 <p className='text-xs text-muted-foreground'>
