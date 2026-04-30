@@ -1,0 +1,45 @@
+/* Extra global polish (tokens live in app/globals.css) */
+
+html {
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: color-mix(in oklab, oklch(var(--primary)) 25%, transparent);
+}
+
+/* Subtle app background (works with light/dark tokens) */
+body {
+  background-image:
+    radial-gradient(
+      1000px 600px at 20% -10%,
+      color-mix(in oklab, oklch(var(--primary)) 18%, transparent),
+      transparent 55%
+    ),
+    radial-gradient(
+      900px 500px at 85% 0%,
+      color-mix(in oklab, oklch(var(--accent)) 14%, transparent),
+      transparent 60%
+    );
+  background-attachment: fixed;
+}
+
+/* Scrollbar (Chromium/WebKit) */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, oklch(var(--foreground)) 18%, transparent);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+

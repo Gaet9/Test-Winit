@@ -1,0 +1,52 @@
+---
+description: Winit technical test context + project conventions
+alwaysApply: true
+---
+
+# Winit technical test rules
+
+## Goal (product)
+
+Build a professional-grade tool for fleet management companies to **monitor NYC parking summons** in near real-time.
+
+## Core requirements (do not drift)
+
+- The app **ingests a CSV** of summons/ticket IDs.
+- For each ID, it **scrapes the New York DMV website** using browser automation.
+- Scraping runs **asynchronously** with **bounded concurrency**.
+- The UI shows a **modern dashboard** and **streams progress updates** while scraping is running.
+
+## Stack to use
+
+- Next.js (App Router) + TypeScript
+- Tailwind CSS + shadcn/ui for the dashboard UI
+- Playwright preferred for scraping (Selenium acceptable if needed)
+
+## Engineering conventions
+
+- Prefer **typed contracts** between UI and API routes (shared `types/` or equivalent).
+- Prefer **server-side scraping** (never run Playwright/Selenium in the browser).
+- Use **timeouts, retries, and defensive waiting** in scraping logic.
+- Emit progress events with a stable schema:
+  - job-level: created/started/completed/failed + totals
+  - item-level: queued/running/succeeded/failed + message + timestamps
+- Keep concurrency bounded and configurable (e.g., env var).
+
+## UX conventions (dashboard)
+
+- Always show:
+  - upload status + validation errors
+  - overall progress (completed/total)
+  - per-ticket row status + last update time
+  - a clear error view (not just “failed”)
+- Prefer shadcn components over custom primitives when possible.
+
+## Development starting point (bootstrap)
+
+Start from:
+
+```bash
+npx create-next-app@latest my-app
+```
+
+Then add Tailwind/shadcn and Playwright as needed.

@@ -1,36 +1,88 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Winit Technical Test — NYC Parking Summons Monitor
 
-## Getting Started
+## Purpose
 
-First, run the development server:
+Build a professional-grade tool for fleet management companies to **monitor NYC parking summons in real-time**.
+
+The app must:
+- **Ingest a CSV** containing ticket/summons IDs.
+- **Scrape the New York DMV website asynchronously** for each ID (at scale).
+- **Stream progress updates** (queued/running/succeeded/failed + partial results) to a **modern dashboard**.
+
+## Stack (chosen)
+
+- **Next.js (App Router)**: Full-stack (UI + API routes) in one codebase, great DX, easy streaming patterns, deployment-friendly.
+- **TypeScript**: Safer refactors and clearer contracts between UI/API/scraper.
+- **Tailwind CSS + shadcn/ui**: Fast, consistent UI with accessible components and a “production dashboard” look quickly.
+- **Playwright (preferred) or Selenium**: Browser automation for DMV scraping where HTML is dynamic/hostile to simple HTTP scraping.
+  - **Why Playwright**: Faster, more modern APIs, strong waiting semantics, reliable headless mode and parallelism.
+  - **Why Selenium**: Widely known, lots of examples; acceptable fallback if required by environment.
+
+## Development steps (from zero)
+
+### 1) Create the app
+
+```bash
+npx create-next-app@latest my-app
+```
+
+Recommended options for this test:
+- TypeScript: **Yes**
+- ESLint: **Yes**
+- Tailwind: **Yes**
+- App Router: **Yes**
+- `src/` directory: optional (either is fine)
+
+### 2) Install UI tooling
+
+```bash
+cd my-app
+npm install
+```
+
+Then initialize shadcn/ui (will prompt for settings):
+
+```bash
+npx shadcn@latest init
+```
+
+Add the components you need (example):
+
+```bash
+npx shadcn@latest add button card input table badge progress tabs toast
+```
+
+### 3) Add scraper dependency
+
+Playwright:
+
+```bash
+npm i playwright
+npx playwright install
+```
+
+### 4) Run locally
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+App runs at `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Suggested architecture (high-level)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **Dashboard UI**: upload CSV, show job runs, live progress + results table.
+- **API**:
+  - `POST /api/jobs`: upload CSV → create job, enqueue summons IDs
+  - `GET /api/jobs/:id/stream`: stream progress events (SSE) to the dashboard
+  - `GET /api/jobs/:id`: fetch final results / summary
+- **Scraping worker**:
+  - Controlled concurrency (e.g., 3–10 tabs) + retries + timeouts
+  - Emits events per ticket ID (started, found, not found, error)
 
-## Learn More
+## What “done” looks like
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- CSV upload works and validates IDs.
+- Scraper runs asynchronously and doesn’t block the UI.
+- Dashboard updates continuously while the scrape is running.
+- Results are exportable (CSV/JSON) and errors are visible.

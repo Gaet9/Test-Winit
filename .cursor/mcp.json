@@ -1,0 +1,19 @@
+{
+    "mcpServers": {
+        "supabase": {
+            "url": "https://mcp.supabase.com/mcp?project_ref=youjgkivbtbffnptsyhl"
+        },
+        "vercel": {
+            "url": "https://mcp.vercel.com/gaetans-projects-98109fe4/test-winit",
+            "headers": {
+                "Authorization": "Bearer ${env:VERCEL_API_KEY}"
+            }
+        },
+        "render": {
+            "url": "https://mcp.render.com/mcp",
+            "headers": {
+                "Authorization": "Bearer ${env:RENDER_API_KEY}"
+            }
+        }
+    }
+}
