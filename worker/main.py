@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
-from playwright.async_api import async_playwright
+from playwright.async_api import Locator, async_playwright
 
 try:
     # Optional dependency. If you don't use Supabase yet, the worker can still run
@@ -78,6 +78,14 @@ class RunJobResponse(BaseModel):
 class WorkerConfig:
     concurrency: int
     headless: bool
+
+
+async def safe_is_visible(loc: Locator) -> bool:
+    """Playwright-Python has no .catch(); use try/except like the TS .catch(() => false) pattern."""
+    try:
+        return await loc.is_visible()
+    except Exception:
+        return False
 
 
 def get_config() -> WorkerConfig:
@@ -226,7 +234,7 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
             'input[type="submit"][value*="Accept" i]',
         ]:
             loc = page.locator(sel).first
-            if await loc.is_visible().catch(lambda _: False):  # type: ignore[attr-defined]
+            if await safe_is_visible(loc):
                 await loc.click()
                 await page.wait_for_load_state("domcontentloaded")
                 break
@@ -239,9 +247,9 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
 
         # Try to click a suggestion; otherwise press Enter.
         menu = page.locator(".ui-autocomplete:visible, ul.ui-menu:visible").first
-        if await menu.is_visible().catch(lambda _: False):  # type: ignore[attr-defined]
+        if await safe_is_visible(menu):
             opt = menu.locator("li").filter(has_text=row.court).first
-            if await opt.is_visible().catch(lambda _: False):  # type: ignore[attr-defined]
+            if await safe_is_visible(opt):
                 await opt.click()
             else:
                 await menu.locator("li").first.click()
