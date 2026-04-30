@@ -3,7 +3,7 @@
  *
  * This script is intentionally verbose + commented for the technical test.
  * The app will eventually call the same logic from a server-side job runner,
- * while streaming SSE progress events to the dashboard.
+ * while streaming SSE progress events to the web UI.
  *
  * Target site:
  *   https://eapps.courts.state.va.us/gdcourts/landing.do
@@ -23,9 +23,22 @@
  *    - go back to results
  */
 
+import { readFileSync } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
+import type { SupabaseClient } from "@supabase/supabase-js"
+import { createClient } from "@supabase/supabase-js"
+import Papa from "papaparse"
 import { chromium, type Page } from "playwright"
+
+import {
+  buildInitialLineStates,
+  completeScrapeJob,
+  failScrapeJob,
+  insertScrapeJob,
+  updateScrapeJob,
+} from "@/lib/scrape-job-worker"
+import type { LineProgressState } from "@/types/scrape-result-line"
 
 type SearchType = "civil" | "traffic/criminal"
 
@@ -36,7 +49,7 @@ export type VaSearchRow = {
   type: SearchType
 }
 
-type CaseExport = {
+export type CaseExport = {
   row: VaSearchRow
   searchedAt: string
   cases: Array<{
@@ -204,7 +217,16 @@ async function backToResults(page: Page) {
   await page.waitForLoadState("domcontentloaded")
 }
 
-export async function runVaGdcourtsFlow(rows: VaSearchRow[], outFile: string) {
+export type VaFlowProgressCtx = {
+  supabase: SupabaseClient
+  jobId: string
+  totalLines: number
+}
+
+export async function runVaGdcourtsFlow(
+  rows: VaSearchRow[],
+  progress?: VaFlowProgressCtx
+): Promise<CaseExport[]> {
   const browser = await chromium.launch({
     headless: true,
   })
@@ -212,9 +234,60 @@ export async function runVaGdcourtsFlow(rows: VaSearchRow[], outFile: string) {
   const context = await browser.newContext()
   const page = await context.newPage()
 
+  const totalLines = rows.length
+  let lineStates: LineProgressState[] | undefined
+  if (progress) {
+    lineStates = buildInitialLineStates(totalLines)
+    await updateScrapeJob(progress.supabase, progress.jobId, {
+      state: "initiating",
+      detail_message: "Launching browser…",
+      lines_state: lineStates,
+      progress_pct: 0,
+    })
+    await updateScrapeJob(progress.supabase, progress.jobId, {
+      detail_message: "Browser ready. Processing CSV lines…",
+    })
+  }
+
+  const syncLine = async (
+    lineIdx: number,
+    linePatch: Partial<LineProgressState>,
+    jobPatch: Record<string, unknown>
+  ) => {
+    if (!progress || !lineStates) return
+    const now = new Date().toISOString()
+    lineStates[lineIdx] = {
+      ...lineStates[lineIdx],
+      ...linePatch,
+      updated_at: now,
+    }
+    await updateScrapeJob(progress.supabase, progress.jobId, {
+      lines_state: lineStates,
+      ...jobPatch,
+    })
+  }
+
   const exports: CaseExport[] = []
 
-  for (const row of rows) {
+  for (let lineIdx = 0; lineIdx < rows.length; lineIdx++) {
+    const row = rows[lineIdx]
+    const lineNo = lineIdx + 1
+    const baseOverall = Math.round((lineIdx / Math.max(totalLines, 1)) * 100)
+
+    await syncLine(
+      lineIdx,
+      {
+        state: "searching",
+        message: `Searching for line ${lineNo}`,
+        progress_pct: baseOverall,
+      },
+      {
+        state: "searching",
+        detail_message: `Searching for line ${lineNo}`,
+        progress_pct: baseOverall,
+      }
+    )
+
     const item: CaseExport = {
       row,
       searchedAt: new Date().toISOString(),
@@ -229,8 +302,25 @@ export async function runVaGdcourtsFlow(rows: VaSearchRow[], outFile: string) {
 
     // After submitting, the results page should contain clickable case links.
     const links = await listCaseLinks(page)
+    const linkCount = Math.max(links.length, 1)
 
     for (let i = 0; i < links.length; i++) {
+      const intra = (i + 1) / linkCount
+      const overall = Math.round(((lineIdx + intra) / Math.max(totalLines, 1)) * 100)
+      await syncLine(
+        lineIdx,
+        {
+          state: "scraping",
+          message: `Scraping line ${lineNo} (case ${i + 1} of ${links.length})`,
+          progress_pct: Math.min(99, overall),
+        },
+        {
+          state: "scraping",
+          detail_message: `Scraping line ${lineNo} (case ${i + 1})`,
+          progress_pct: Math.min(99, overall),
+        }
+      )
+
       // Re-acquire the locator list each time because the DOM can change after navigation.
       const freshLinks = await listCaseLinks(page)
       const link = freshLinks[i]?.locator
@@ -254,33 +344,193 @@ export async function runVaGdcourtsFlow(rows: VaSearchRow[], outFile: string) {
       await page.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => {})
     }
 
+    const lineDonePct = Math.round(((lineIdx + 1) / Math.max(totalLines, 1)) * 100)
+    await syncLine(
+      lineIdx,
+      {
+        state: "scraping_complete",
+        message: `Line ${lineNo} complete (${item.cases.length} case(s))`,
+        progress_pct: 100,
+      },
+      {
+        state: "running",
+        detail_message: `Finished line ${lineNo} of ${totalLines}`,
+        progress_pct: lineDonePct,
+      }
+    )
+
     exports.push(item)
   }
 
   await browser.close()
+  return exports
+}
+
+function parseSearchType(raw: string | undefined): SearchType {
+  const v = (raw ?? "").trim().toLowerCase()
+  if (v === "civil" || v === "v") return "civil"
+  return "traffic/criminal"
+}
+
+export function loadVaRowsFromCsvPath(csvPath: string): VaSearchRow[] {
+  const text = readFileSync(csvPath, "utf8")
+  const parsed = Papa.parse<Record<string, string>>(text, {
+    header: true,
+    skipEmptyLines: true,
+  })
+  if (parsed.errors.length) {
+    throw new Error(parsed.errors.map((e) => e.message).join("; "))
+  }
+  const rows: VaSearchRow[] = []
+  for (const r of parsed.data) {
+    const firstName = (r.firstName ?? r.firstname ?? "").trim()
+    const lastName = (r.lastName ?? r.lastname ?? "").trim()
+    const court = (r.court ?? "").trim()
+    if (!firstName || !lastName || !court) continue
+    rows.push({
+      firstName,
+      lastName,
+      court,
+      type: parseSearchType(r.type),
+    })
+  }
+  if (!rows.length) {
+    throw new Error(
+      "CSV contained no valid rows (need firstName, lastName, court, type columns)."
+    )
+  }
+  return rows
+}
+
+export async function persistWorkerScrapeRunToSupabase(options: {
+  name: string
+  lineCount: number
+  results: CaseExport[]
+}) {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) {
+    console.warn(
+      "[worker] NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing; skip DB insert."
+    )
+    return
+  }
+  const supabase = createClient(url, key)
+  const now = new Date()
+  const { error } = await supabase.from("worker_scrape_runs").insert({
+    name: options.name,
+    run_date: now.toISOString().slice(0, 10),
+    processed_at: now.toISOString(),
+    line_count: options.lineCount,
+    results: options.results,
+  })
+  if (error) throw error
+  console.log("[worker] Inserted worker_scrape_runs row:", options.name)
+}
+
+function parseCliArgs(argv: string[]) {
+  let csvPath: string | undefined
+  let name = "va-gdcourts"
+  let outFile = "output/va-gdcourts-export.json"
+  let skipSupabase = false
+  let jobId: string | undefined
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === "--csv") {
+      csvPath = argv[++i]
+      continue
+    }
+    if (a === "--name") {
+      name = argv[++i]
+      continue
+    }
+    if (a === "--job-id") {
+      jobId = argv[++i]
+      continue
+    }
+    if (a === "--no-supabase") {
+      skipSupabase = true
+      continue
+    }
+    if (!a.startsWith("-")) {
+      outFile = a
+    }
+  }
+  return { csvPath, name, outFile, skipSupabase, jobId }
+}
+
+/**
+ * CLI (load env from `.env.local` via Node 20+):
+ *   node --env-file=.env.local ./node_modules/tsx/dist/cli.mjs scripts/va-gdcourts-scrape.playwright.ts --csv ./rows.csv --name "Batch 1" [--job-id <uuid>] ./out/export.json
+ *
+ * Or: `npm run worker:va-gdcourts -- --csv ./rows.csv --name "Batch 1"`
+ * (set env in the shell first if not using --env-file).
+ */
+async function main() {
+  const { csvPath, name, outFile, skipSupabase, jobId: existingJobId } = parseCliArgs(process.argv)
+  if (!csvPath) {
+    console.error(
+      "Usage: npx tsx scripts/va-gdcourts-scrape.playwright.ts --csv <file.csv> [--name <job>] [--job-id <uuid>] [--no-supabase] [out.json]"
+    )
+    console.error("CSV columns: firstName, lastName, court, type (civil | traffic/criminal)")
+    process.exit(1)
+  }
+  const rows = loadVaRowsFromCsvPath(csvPath)
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const supabase =
+    !skipSupabase && url && key ? createClient(url, key) : null
+
+  let jobId: string | undefined
+  if (supabase) {
+    if (existingJobId) {
+      jobId = existingJobId
+    } else {
+      jobId = await insertScrapeJob(supabase, name, rows.length)
+    }
+    console.log(
+      JSON.stringify({
+        event: "job_started",
+        jobId,
+        ssePath: `/api/scrape-jobs/${jobId}/sse`,
+      })
+    )
+  }
+
+  let exports: CaseExport[]
+  try {
+    exports = await runVaGdcourtsFlow(
+      rows,
+      supabase && jobId
+        ? { supabase, jobId, totalLines: rows.length }
+        : undefined
+    )
+  } catch (e) {
+    if (supabase && jobId) {
+      await failScrapeJob(
+        supabase,
+        jobId,
+        e instanceof Error ? e.message : String(e)
+      )
+    }
+    throw e
+  }
 
   const outDir = path.dirname(outFile)
   await fs.mkdir(outDir, { recursive: true })
   await fs.writeFile(outFile, JSON.stringify(exports, null, 2), "utf8")
-}
+  console.log("[worker] Wrote JSON:", path.resolve(outFile))
 
-/**
- * CLI usage:
- *   node --loader ts-node/esm scripts/va-gdcourts-scrape.playwright.ts out.json
- *
- * For the technical test, you’ll likely invoke `runVaGdcourtsFlow()` from an API
- * route / background job using the parsed CSV rows, then stream SSE.
- */
-async function main() {
-  // This file focuses on the browser flow. To keep it standalone, we accept a minimal
-  // inline demo dataset if no job runner is wired yet.
-  const outFile = process.argv[2] ?? "output/va-gdcourts-export.json"
-
-  const demoRows: VaSearchRow[] = [
-    { firstName: "JOHN", lastName: "DOE", court: "Accomack", type: "traffic/criminal" },
-  ]
-
-  await runVaGdcourtsFlow(demoRows, outFile)
+  if (supabase && jobId) {
+    await completeScrapeJob(supabase, jobId)
+  }
+  if (!skipSupabase) {
+    await persistWorkerScrapeRunToSupabase({
+      name,
+      lineCount: rows.length,
+      results: exports,
+    })
+  }
 }
 
 // Allow importing from the app without auto-running.
