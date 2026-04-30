@@ -21,17 +21,34 @@ const bodySchema = z.object({
   rows: z.array(rowSchema).min(1).max(500),
 })
 
-export async function POST(req: Request) {
-  if (process.env.VERCEL) {
-    return Response.json(
-      {
-        error:
-          "Starting the Playwright worker from this serverless deployment is not supported. Run `npm run dev` locally and use Start scraping there, or run the worker from a long-lived host.",
-      },
-      { status: 501 }
-    )
-  }
+function remoteWorkerBaseUrl(): string | null {
+  const raw = process.env.RENDER_WORKER_URL?.trim()
+  if (!raw) return null
+  return raw.replace(/\/$/, "")
+}
 
+function hasRemoteWorker(): boolean {
+  return !!(remoteWorkerBaseUrl() && process.env.WORKER_WEBHOOK_SECRET?.trim())
+}
+
+async function forwardToRemoteWorker(jobId: string, name: string, rows: z.infer<typeof bodySchema>["rows"]) {
+  const base = remoteWorkerBaseUrl()!
+  const secret = process.env.WORKER_WEBHOOK_SECRET!.trim()
+  const res = await fetch(`${base}/run`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${secret}`,
+    },
+    body: JSON.stringify({ job_id: jobId, name, rows }),
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`Worker HTTP ${res.status}: ${text.slice(0, 800)}`)
+  }
+}
+
+export async function POST(req: Request) {
   let json: unknown
   try {
     json = await req.json()
@@ -45,6 +62,17 @@ export async function POST(req: Request) {
   }
 
   const { name, rows } = parsed.data
+
+  if (process.env.VERCEL && !hasRemoteWorker()) {
+    return Response.json(
+      {
+        error:
+          "Vercel cannot run Playwright here. Set RENDER_WORKER_URL (e.g. https://your-service.onrender.com) and WORKER_WEBHOOK_SECRET on Vercel to forward jobs to a Render worker, or run `npm run dev` locally.",
+      },
+      { status: 501 }
+    )
+  }
+
   const supabase = createSupabaseAdminClient()
   if (!supabase) {
     return Response.json(
@@ -58,6 +86,21 @@ export async function POST(req: Request) {
     jobId = await insertScrapeJob(supabase, name, rows.length)
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })
+  }
+
+  if (hasRemoteWorker()) {
+    try {
+      await forwardToRemoteWorker(jobId, name, rows)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      try {
+        await failScrapeJob(supabase, jobId, msg)
+      } catch {
+        // ignore
+      }
+      return Response.json({ error: msg }, { status: 502 })
+    }
+    return Response.json({ jobId, ssePath: `/api/scrape-jobs/${jobId}/sse` })
   }
 
   const stamp = randomUUID()

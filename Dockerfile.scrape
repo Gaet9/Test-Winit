@@ -1,0 +1,19 @@
+# Long-running scrape worker for Render (Node + Playwright + same TS script as local).
+# Render: Web Service → Docker, repo root, Dockerfile path `Dockerfile.scrape`.
+# Env: WORKER_WEBHOOK_SECRET, NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PORT (set by Render).
+
+FROM mcr.microsoft.com/playwright:v1.59.0-noble
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --include=dev
+
+COPY tsconfig.json ./
+COPY lib ./lib
+COPY types ./types
+COPY scripts ./scripts
+
+ENV NODE_ENV=production
+
+CMD ["npx", "tsx", "scripts/render-scrape-webhook.ts"]

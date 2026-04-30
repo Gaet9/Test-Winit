@@ -18,11 +18,12 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, ConfigDict, Field
 from playwright.async_api import async_playwright
 
 try:
@@ -56,9 +57,14 @@ class RunJobRequest(BaseModel):
 
     Demo mode (no DB):
       - pass rows directly (useful while wiring the system).
+
+    Next.js (Vercel) forwards: job_id, name, rows — name is ignored here for now.
     """
 
+    model_config = ConfigDict(extra="ignore")
+
     job_id: Optional[str] = None
+    name: Optional[str] = None
     rows: Optional[list[VaSearchRow]] = None
 
 
@@ -101,8 +107,26 @@ def health() -> dict[str, Any]:
     return {"ok": True, "supabase": _SUPABASE_AVAILABLE}
 
 
+_bearer = HTTPBearer(auto_error=False)
+
+
+def require_webhook_secret(
+    creds: Annotated[Optional[HTTPAuthorizationCredentials], Depends(_bearer)],
+) -> None:
+    secret = os.getenv("WORKER_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        return
+    token = creds.credentials if creds and creds.scheme.lower() == "bearer" else ""
+    if token != secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 @app.post("/run", response_model=RunJobResponse)
-async def run(req: RunJobRequest, bg: BackgroundTasks) -> RunJobResponse:
+async def run(
+    req: RunJobRequest,
+    bg: BackgroundTasks,
+    _: Annotated[None, Depends(require_webhook_secret)],
+) -> RunJobResponse:
     """
     Queue a scraping job.
 
@@ -110,6 +134,8 @@ async def run(req: RunJobRequest, bg: BackgroundTasks) -> RunJobResponse:
     - This endpoint should *only enqueue* work (or start a background task)
       and return immediately.
     - Job state should be written to Supabase so the Next.js app can stream it via SSE.
+
+    If WORKER_WEBHOOK_SECRET is set, require Authorization: Bearer <secret>.
     """
 
     if not req.job_id and not req.rows:
