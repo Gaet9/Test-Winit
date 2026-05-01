@@ -82,6 +82,56 @@ function resolveLineDisputeClassification(
     return "NOT DISPUTABLE";
 }
 
+function resolveArchiveLineCaseCount(r: ScrapeResultLineRow, archiveRuns: WorkerScrapeRunArchive[]): number | null {
+    if (r.source !== "archive") return null;
+    const run = archiveRuns.find((x) => x.id === r.runId);
+    if (!run) return null;
+    const arr = run.results as unknown;
+    if (!Array.isArray(arr)) return null;
+    const item = arr[r.lineIndex - 1] as Record<string, unknown> | undefined;
+    const cases = item && (item.cases as unknown);
+    return Array.isArray(cases) ? cases.length : null;
+}
+
+type LineIssueKind = "site_down" | "scrape_error" | null;
+
+function resolveLineIssueKind(r: ScrapeResultLineRow): LineIssueKind {
+    const msg = (r.message ?? "").toLowerCase();
+    const st = (r.state ?? "").toLowerCase();
+    if (st === "failed") {
+        // Try to differentiate infra vs scrape errors.
+        if (
+            msg.includes("timeout") ||
+            msg.includes("timed out") ||
+            msg.includes("net::") ||
+            msg.includes("econnrefused") ||
+            msg.includes("enotfound") ||
+            msg.includes("dns") ||
+            msg.includes("502") ||
+            msg.includes("503") ||
+            msg.includes("504") ||
+            msg.includes("service unavailable") ||
+            msg.includes("bad gateway") ||
+            msg.includes("gateway timeout")
+        ) {
+            return "site_down";
+        }
+        return "scrape_error";
+    }
+    // Non-failed but still indicates infra issue.
+    if (
+        msg.includes("service unavailable") ||
+        msg.includes("bad gateway") ||
+        msg.includes("gateway timeout") ||
+        msg.includes("net::") ||
+        msg.includes("econnrefused") ||
+        msg.includes("enotfound")
+    ) {
+        return "site_down";
+    }
+    return null;
+}
+
 function ResultsSection({
     title,
     description,
@@ -101,6 +151,57 @@ function ResultsSection({
     hasMore: boolean;
     onEndReached: () => void;
 }) {
+    type SortKey = "source" | "run" | "label" | "dispute" | "state" | "progress" | "detail" | "updated" | "cases";
+    const [sortKey, setSortKey] = React.useState<SortKey>("updated");
+    const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
+
+    const toggleSort = React.useCallback((k: SortKey) => {
+        setSortKey((prev) => {
+            if (prev !== k) {
+                setSortDir("asc");
+                return k;
+            }
+            setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+            return prev;
+        });
+    }, []);
+
+    const sortedRows = React.useMemo(() => {
+        const dir = sortDir === "asc" ? 1 : -1;
+        const get = (r: ScrapeResultLineRow) => {
+            switch (sortKey) {
+                case "source":
+                    return r.source;
+                case "run":
+                    return `${r.runName}\u0000${String(r.lineIndex).padStart(6, "0")}`;
+                case "label":
+                    return r.lineLabel;
+                case "state":
+                    return r.state;
+                case "progress":
+                    return r.progressPct;
+                case "updated":
+                    return new Date(r.updatedAt).getTime() || 0;
+                case "detail":
+                    return r.message ?? "";
+                case "dispute":
+                    return resolveLineDisputeClassification(r, archiveRuns) ?? "";
+                case "cases":
+                    return resolveArchiveLineCaseCount(r, archiveRuns) ?? -1;
+                default:
+                    return "";
+            }
+        };
+        const copy = [...rows];
+        copy.sort((a, b) => {
+            const av = get(a) as unknown;
+            const bv = get(b) as unknown;
+            if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+            return String(av).localeCompare(String(bv)) * dir;
+        });
+        return copy;
+    }, [rows, sortKey, sortDir, archiveRuns]);
+
     const sentinelRef = React.useRef<HTMLDivElement | null>(null);
     React.useEffect(() => {
         if (!hasMore) return;
@@ -129,18 +230,34 @@ function ResultsSection({
                     </TableCaption>
                     <TableHeader>
                         <TableRow>
-                            <TableHead className='hidden sm:table-cell'>Source</TableHead>
-                            <TableHead>Run / line</TableHead>
-                            <TableHead>Label</TableHead>
-                            <TableHead className='hidden sm:table-cell'>Dispute</TableHead>
-                            <TableHead>State</TableHead>
-                            <TableHead className='text-right w-24'>Progress</TableHead>
-                            <TableHead className='hidden md:table-cell'>Detail</TableHead>
-                            <TableHead className='hidden lg:table-cell'>Updated</TableHead>
+                            <TableHead className='hidden sm:table-cell cursor-pointer select-none' onClick={() => toggleSort("source")}>
+                                Source
+                            </TableHead>
+                            <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("run")}>
+                                Run / line
+                            </TableHead>
+                            <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("label")}>
+                                Label
+                            </TableHead>
+                            <TableHead className='hidden sm:table-cell cursor-pointer select-none' onClick={() => toggleSort("dispute")}>
+                                Dispute
+                            </TableHead>
+                            <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("state")}>
+                                State
+                            </TableHead>
+                            <TableHead className='text-right w-24 cursor-pointer select-none' onClick={() => toggleSort("progress")}>
+                                Progress
+                            </TableHead>
+                            <TableHead className='hidden md:table-cell cursor-pointer select-none' onClick={() => toggleSort("detail")}>
+                                Detail
+                            </TableHead>
+                            <TableHead className='hidden lg:table-cell cursor-pointer select-none' onClick={() => toggleSort("updated")}>
+                                Updated
+                            </TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
-                        {rows.map((r) => (
+                        {sortedRows.map((r) => (
                             <TableRow
                                 key={r.key}
                                 role='button'
@@ -174,7 +291,20 @@ function ResultsSection({
                                 </TableCell>
                                 <TableCell className='text-right tabular-nums whitespace-nowrap'>{r.progressPct}%</TableCell>
                                 <TableCell className='hidden md:table-cell max-w-[320px] truncate text-muted-foreground text-sm'>
-                                    {r.message || "—"}
+                                    {(() => {
+                                        const issue = resolveLineIssueKind(r);
+                                        const cases = resolveArchiveLineCaseCount(r, archiveRuns);
+                                        if (issue === "site_down") {
+                                            return <span className='text-destructive font-medium'>Site down / network error</span>;
+                                        }
+                                        if (issue === "scrape_error") {
+                                            return <span className='text-destructive font-medium'>Scrape error</span>;
+                                        }
+                                        if (cases === 0) {
+                                            return <span className='text-muted-foreground font-medium'>No cases found</span>;
+                                        }
+                                        return r.message || "—";
+                                    })()}
                                 </TableCell>
                                 <TableCell className='hidden lg:table-cell text-xs text-muted-foreground whitespace-nowrap'>
                                     {new Date(r.updatedAt).toLocaleString()}
