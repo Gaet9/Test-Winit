@@ -37,13 +37,11 @@ The app must:
 
 The dashboard shows **near real-time** job progress using the browser’s **`EventSource`** API against a Next.js route.
 
-**Endpoint:** `GET /api/scrape-jobs/:id/sse` (see `app/api/scrape-jobs/[id]/sse/route.ts`).
-
 **Flow:**
 
 1. The client opens a single long-lived HTTP response with `Content-Type: text/event-stream`.
 2. The route uses the **server-side Supabase admin client** and loads the job row.
-3. It writes one SSE frame: `data: <json>\n\n` where `<json>` is the **full `worker_scrape_jobs` row**, including `lines_state` (so the UI can replace state wholesale).
+3. It writes one SSE frame: `data: <json>\n\n` where `<json>` is the **full `worker_scrape_jobs` row**, including `lines_state`.
 4. If the job is not finished (`state` not `scraping_complete` or `failed`), the server **waits ~800ms** and repeats from step 2.
 5. When the job reaches a terminal state, it sends the final snapshot and **closes** the stream.
 
@@ -55,12 +53,13 @@ The dashboard shows **near real-time** job progress using the browser’s **`Eve
 
 **Hosting note:** the SSE handler must stay open for the whole scrape. Check your host’s **maximum serverless duration**; very long jobs may need reconnect logic or a long-lived process next to the worker.
 
-## How we filtered noise and repetitive data (without AI)
+## How we filtered noise and repetitive data without AI agent
 
-The VA case detail pages contain many table cells and repeated UI elements. Exporting “every table cell” produces huge, repetitive JSON that is hard to read and expensive to store.
+The General distrcit court case detail pages contain many table cells and repeated UI elements. Exporting “every table cell” produces huge, repetitive JSON that is hard to read and expensive to store.
 
 Instead, we generate **clean, compact, deterministic exports** using simple DOM rules:
 
+- **Identification of the HTML structure**: Manual check for more efficient scrapping
 - **Extract only label/value pairs**: we treat cells with `labelgrid…` classes as labels (e.g. “Case Number:”) and capture the adjacent value cell.
 - **Avoid accidental label-as-value**: the value cell is accepted unless it _looks like another label_ (typically ends with `:`).
 - **Skip empty values**: we drop label entries that have no value, which removes lots of decorative or placeholder fields.
