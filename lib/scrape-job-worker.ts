@@ -2,6 +2,17 @@ import type { SupabaseClient } from "@supabase/supabase-js"
 
 import type { LineProgressState } from "@/types/scrape-result-line"
 
+/** Job-level progress: arithmetic mean of each line’s `progress_pct` (0–100). */
+export function averageLineProgressPct(lines: LineProgressState[]): number {
+  if (!lines.length) return 0
+  let sum = 0
+  for (const l of lines) {
+    const v = Number(l.progress_pct)
+    sum += Number.isFinite(v) ? Math.min(100, Math.max(0, Math.round(v))) : 0
+  }
+  return Math.round(sum / lines.length)
+}
+
 export function buildInitialLineStates(totalLines: number): LineProgressState[] {
   const now = new Date().toISOString()
   return Array.from({ length: totalLines }, (_, i) => ({

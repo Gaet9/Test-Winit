@@ -48,7 +48,9 @@ async function main() {
             line: i + 1,
             name: `${ex.row.lastName}, ${ex.row.firstName}`,
             cases: ex.cases.length,
-            tablesPerCase: ex.cases.map((c) => c.tables?.length ?? 0),
+            fieldPairsPerCase: ex.cases.map((c) =>
+                (c.tables ?? []).reduce((n, t) => n + (t.fields?.length ?? 0), 0),
+            ),
         };
         console.log("[smoke] result:", JSON.stringify(summary));
     }

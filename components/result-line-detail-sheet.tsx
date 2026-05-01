@@ -23,8 +23,13 @@ import {
   TableRow,
 } from "@/components/ui/table"
 
+type VaFieldPair = { label: string; value: string }
+
 type VaTable = {
   title?: string
+  /** Preferred compact export (label/value grid). */
+  fields?: VaFieldPair[]
+  /** Legacy full table dump (older archives). */
   headers?: string[]
   rows?: string[][]
 }
@@ -103,7 +108,10 @@ export function ResultLineDetailSheet(props: {
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-full sm:max-w-2xl overflow-y-auto">
+      <SheetContent
+        side="right"
+        className="w-full sm:max-w-[min(96vw,56rem)] sm:w-[min(96vw,56rem)] overflow-y-auto"
+      >
         {row ?
           <>
             <SheetHeader className="text-left">
@@ -274,6 +282,20 @@ function CaseBlock({ c, caseIndex }: { c: VaCase; caseIndex: number }) {
 }
 
 function CaseTable({ table }: { table: VaTable }) {
+  const fields = Array.isArray(table.fields) ? table.fields : []
+  if (fields.length > 0) {
+    return (
+      <dl className="grid gap-x-4 gap-y-2 text-sm sm:grid-cols-[minmax(0,11rem)_1fr] border rounded-md p-3">
+        {fields.map((f, i) => (
+          <React.Fragment key={`${f.label}-${i}`}>
+            <dt className="text-xs font-medium text-muted-foreground wrap-break-word">{f.label || "—"}</dt>
+            <dd className="text-foreground wrap-break-word min-w-0">{f.value || "—"}</dd>
+          </React.Fragment>
+        ))}
+      </dl>
+    )
+  }
+
   const headers = Array.isArray(table.headers) && table.headers.length > 0 ? table.headers : null
   const bodyRows = Array.isArray(table.rows) ? table.rows : []
 
@@ -288,7 +310,7 @@ function CaseTable({ table }: { table: VaTable }) {
           {bodyRows.map((cells, ri) => (
             <TableRow key={ri}>
               {(cells ?? []).map((cell, ci) => (
-                <TableCell key={ci} className="text-xs whitespace-nowrap max-w-[240px] truncate">
+                <TableCell key={ci} className="text-xs wrap-break-word max-w-none min-w-[8rem]">
                   {cell}
                 </TableCell>
               ))}
@@ -314,7 +336,7 @@ function CaseTable({ table }: { table: VaTable }) {
         {bodyRows.map((cells, ri) => (
           <TableRow key={ri}>
             {headers.map((_, ci) => (
-              <TableCell key={ci} className="text-xs max-w-[min(280px,28vw)] wrap-break-word">
+              <TableCell key={ci} className="text-xs wrap-break-word max-w-none min-w-[10rem]">
                 {(cells ?? [])[ci] ?? ""}
               </TableCell>
             ))}

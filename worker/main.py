@@ -126,9 +126,13 @@ def get_supabase():
     return create_client(url, key)
 
 
-# Same table serialization as scripts/va-gdcourts-scrape.playwright.ts exportAllTablesOnPage
-_EXPORT_TABLES_JS = r"""() => {
-  const norm = (s) => String(s || "").replace(/\s+/g, " ").trim();
+# Same label/value extraction as scripts/va-gdcourts-scrape.playwright.ts exportCaseDetailLabelValues
+_EXPORT_CASE_DETAIL_FIELDS_JS = r"""() => {
+  const norm = (s) =>
+    String(s ?? "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   function guessTitle(table) {
     const prev = table.closest("td")?.previousElementSibling;
     const t1 = prev ? norm(prev.textContent) : "";
@@ -137,20 +141,35 @@ _EXPORT_TABLES_JS = r"""() => {
     const t2 = headerTd ? norm(headerTd.textContent) : "";
     return t2 || undefined;
   }
+  function isLabelCell(el) {
+    const cn = el.className || "";
+    return typeof cn === "string" && cn.includes("labelgrid");
+  }
   const tables = Array.from(document.querySelectorAll("table")).filter((t) => {
     const rect = t.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   });
-  return tables.map((t) => {
-    const title = guessTitle(t);
-    const ths = Array.from(t.querySelectorAll("tr th")).map((th) => norm(th.textContent));
-    const headers = ths.length > 0 ? ths : undefined;
-    const rows = Array.from(t.querySelectorAll("tr")).map((tr) => {
-      const cells = Array.from(tr.querySelectorAll("th,td")).map((td) => norm(td.textContent));
-      return cells.filter((c) => c !== "");
-    });
-    return { title, headers, rows: rows.filter((r) => r.length > 0) };
-  });
+  const out = [];
+  for (const table of tables) {
+    const fields = [];
+    for (const tr of table.querySelectorAll("tr")) {
+      const cells = Array.from(tr.querySelectorAll("td, th"));
+      for (let i = 0; i < cells.length; i++) {
+        const td = cells[i];
+        if (!isLabelCell(td)) continue;
+        let rawLabel = norm(td.textContent);
+        rawLabel = rawLabel.replace(/:\s*$/, "");
+        const next = cells[i + 1];
+        const nextCn = next ? String(next.className || "") : "";
+        const value = next && !nextCn.includes("labelgrid") ? norm(next.textContent) : "";
+        if (!rawLabel && !value) continue;
+        fields.push({ label: rawLabel, value });
+      }
+    }
+    if (fields.length === 0) continue;
+    out.push({ title: guessTitle(table), fields });
+  }
+  return out;
 }"""
 
 
@@ -162,7 +181,7 @@ async def list_case_link_locators(page: Page) -> list[Locator]:
 
 
 async def export_all_tables_on_page(page: Page) -> list[dict[str, Any]]:
-    raw = await page.evaluate(_EXPORT_TABLES_JS)
+    raw = await page.evaluate(_EXPORT_CASE_DETAIL_FIELDS_JS)
     return list(raw) if isinstance(raw, list) else []
 
 
@@ -245,6 +264,19 @@ def _fail_worker_scrape_job_sync(sb: Any, job_id: str, message: str) -> None:
     ).eq("id", job_id).execute()
 
 
+def _avg_line_progress_pct(lines: list[dict[str, Any]]) -> int:
+    if not lines:
+        return 0
+    acc = 0
+    for ln in lines:
+        try:
+            v = int(ln.get("progress_pct", 0))
+        except (TypeError, ValueError):
+            v = 0
+        acc += max(0, min(100, v))
+    return round(acc / len(lines))
+
+
 def _patch_worker_scrape_job_line_sync(
     sb: Any,
     job_id: str,
@@ -274,7 +306,9 @@ def _patch_worker_scrape_job_line_sync(
     merged = {**cur, **line_patch, "updated_at": iso_now()}
     merged.setdefault("lineIndex", line_no)
     lines[line_idx_0] = merged
-    top: dict[str, Any] = {"lines_state": lines, "updated_at": iso_now(), **job_patch}
+    job_no_pct = {k: v for k, v in job_patch.items() if k != "progress_pct"}
+    top: dict[str, Any] = {"lines_state": lines, "updated_at": iso_now(), **job_no_pct}
+    top["progress_pct"] = _avg_line_progress_pct(lines)
     sb.table("worker_scrape_jobs").update(top).eq("id", job_id).execute()
 
 
@@ -315,22 +349,15 @@ async def bump_line_progress(
     job_id: Optional[str],
     line_idx_0: int,
     line_no: int,
-    total_lines: int,
-    frac_in_line: float,
+    line_progress_pct: int,
     state: str,
     line_message: str,
     job_detail: str,
 ) -> None:
-    """
-    Map sub-step progress within the current line to overall job progress_pct.
-
-    frac_in_line is 0..1 within this CSV line's work (browser → search → cases).
-    """
+    """Update one line’s progress (0–100 for that CSV row). Job `progress_pct` is the mean of all lines."""
     if sb is None or not job_id:
         return
-    tl = max(total_lines, 1)
-    f = max(0.0, min(1.0, frac_in_line))
-    overall = min(99, round(((line_idx_0 + f) / tl) * 100))
+    pct = max(0, min(99, int(line_progress_pct)))
     await patch_worker_scrape_job_line(
         sb,
         job_lock,
@@ -341,12 +368,11 @@ async def bump_line_progress(
             "lineIndex": line_no,
             "state": state,
             "message": line_message,
-            "progress_pct": overall,
+            "progress_pct": pct,
         },
         {
             "state": state,
             "detail_message": job_detail,
-            "progress_pct": overall,
         },
     )
 
@@ -597,7 +623,6 @@ async def scrape_one_row(
     }
 
     line_no = line_idx_0 + 1
-    tl = max(total_lines, 1)
     if job_id and sb is not None:
         await bump_line_progress(
             sb,
@@ -605,8 +630,7 @@ async def scrape_one_row(
             job_id,
             line_idx_0,
             line_no,
-            total_lines,
-            0.0,
+            0,
             "searching",
             f"Searching: {row.lastName}, {row.firstName} · {row.court}",
             f"Line {line_no}/{total_lines}: start (0%)",
@@ -622,13 +646,12 @@ async def scrape_one_row(
                 job_id,
                 line_idx_0,
                 line_no,
-                total_lines,
-                0.06,
+                6,
                 "searching",
                 "Chromium launched",
                 f"Line {line_no}/{total_lines}: browser ready (~6%)",
             )
-        wl(f"scrape browser launched pct≈{min(99, round(((line_idx_0 + 0.06) / tl) * 100))}% {label}")
+        wl(f"scrape browser launched line_pct≈6% {label}")
         context = await browser.new_context()
         page = await context.new_page()
 
@@ -640,8 +663,7 @@ async def scrape_one_row(
                 job_id,
                 line_idx_0,
                 line_no,
-                total_lines,
-                0.12,
+                12,
                 "searching",
                 "GDC landing page loaded",
                 f"Line {line_no}/{total_lines}: landing (~12%)",
@@ -670,8 +692,7 @@ async def scrape_one_row(
                 job_id,
                 line_idx_0,
                 line_no,
-                total_lines,
-                0.16,
+                16,
                 "searching",
                 "Disclaimer step done (if any)",
                 f"Line {line_no}/{total_lines}: post-disclaimer (~16%)",
@@ -713,8 +734,7 @@ async def scrape_one_row(
                 job_id,
                 line_idx_0,
                 line_no,
-                total_lines,
-                0.24,
+                24,
                 "searching",
                 f"Court field set: {row.court}",
                 f"Line {line_no}/{total_lines}: court selected (~24%)",
@@ -740,8 +760,7 @@ async def scrape_one_row(
                 job_id,
                 line_idx_0,
                 line_no,
-                total_lines,
-                0.32,
+                32,
                 "searching",
                 "Name search form open",
                 f"Line {line_no}/{total_lines}: name-search page (~32%)",
@@ -759,8 +778,7 @@ async def scrape_one_row(
                 job_id,
                 line_idx_0,
                 line_no,
-                total_lines,
-                0.40,
+                40,
                 "searching",
                 "Name fields filled; submitting search",
                 f"Line {line_no}/{total_lines}: submit search (~40%)",
@@ -784,8 +802,7 @@ async def scrape_one_row(
                 job_id,
                 line_idx_0,
                 line_no,
-                total_lines,
-                0.50,
+                50,
                 "searching",
                 "Results page loaded (post-search)",
                 f"Line {line_no}/{total_lines}: results DOM (~50%)",
@@ -803,8 +820,7 @@ async def scrape_one_row(
                 job_id,
                 line_idx_0,
                 line_no,
-                total_lines,
-                0.56 if n_case else 0.88,
+                56 if n_case else 88,
                 "scraping" if n_case else "searching",
                 f"Found {n_case} case link(s)" if n_case else "No case links — finishing line",
                 f"Line {line_no}/{total_lines}: {'cases to scrape' if n_case else 'zero results'} (~{56 if n_case else 88}%)",
@@ -822,6 +838,9 @@ async def scrape_one_row(
             base_frac = 0.56 + span * (i / link_count)
             mid_frac = 0.56 + span * ((i + 0.45) / link_count)
             end_frac = 0.56 + span * ((i + 0.92) / link_count)
+            base_pct = min(99, round(base_frac * 100))
+            mid_pct = min(99, round(mid_frac * 100))
+            end_pct = min(99, round(end_frac * 100))
             if job_id and sb is not None:
                 await bump_line_progress(
                     sb,
@@ -829,16 +848,12 @@ async def scrape_one_row(
                     job_id,
                     line_idx_0,
                     line_no,
-                    total_lines,
-                    base_frac,
+                    base_pct,
                     "scraping",
                     f"Opening case {i + 1}/{n_case} ({case_id_text or '?'})",
                     f"Line {line_no}/{total_lines}: case {i + 1}/{n_case} open",
                 )
-            wl(
-                f"scrape case {i + 1}/{n_case} open pct≈{min(99, round(((line_idx_0 + base_frac) / tl) * 100))}% "
-                f"id={case_id_text!r} {label}"
-            )
+            wl(f"scrape case {i + 1}/{n_case} open line_pct≈{base_pct}% id={case_id_text!r} {label}")
             await link_loc.click()
             await page.wait_for_load_state("domcontentloaded")
             try:
@@ -852,15 +867,14 @@ async def scrape_one_row(
                     job_id,
                     line_idx_0,
                     line_no,
-                    total_lines,
-                    mid_frac,
+                    mid_pct,
                     "scraping",
-                    f"Extracting tables for case {i + 1}/{n_case}",
+                    f"Extracting case detail for case {i + 1}/{n_case}",
                     f"Line {line_no}/{total_lines}: case detail page",
                 )
             wl(f"scrape case {i + 1}/{n_case} detail page loaded {label}")
             tables = await export_all_tables_on_page(page)
-            wl(f"scrape case {i + 1}/{n_case} tables={len(tables)} id={case_id_text!r} {label}")
+            wl(f"scrape case {i + 1}/{n_case} label_sections={len(tables)} id={case_id_text!r} {label}")
             if job_id and sb is not None:
                 await bump_line_progress(
                     sb,
@@ -868,10 +882,9 @@ async def scrape_one_row(
                     job_id,
                     line_idx_0,
                     line_no,
-                    total_lines,
-                    end_frac,
+                    end_pct,
                     "scraping",
-                    f"Exported {len(tables)} table(s); returning to results",
+                    f"Exported {len(tables)} field section(s); returning to results",
                     f"Line {line_no}/{total_lines}: case {i + 1}/{n_case} extracted",
                 )
             item["cases"].append(
@@ -892,7 +905,6 @@ async def scrape_one_row(
         await context.close()
         await browser.close()
         wl(f"scrape playwright END {label} exported_cases={len(item['cases'])}")
-    line_done_pct = round(((line_idx_0 + 1) / tl) * 100)
     if job_id and sb is not None:
         await patch_worker_scrape_job_line(
             sb,
@@ -909,7 +921,6 @@ async def scrape_one_row(
             {
                 "state": "running",
                 "detail_message": f"Finished line {line_no} of {total_lines}",
-                "progress_pct": line_done_pct,
             },
         )
     return item

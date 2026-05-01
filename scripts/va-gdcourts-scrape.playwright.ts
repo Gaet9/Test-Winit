@@ -32,6 +32,7 @@ import Papa from "papaparse"
 import { chromium, type Page } from "playwright"
 
 import {
+  averageLineProgressPct,
   buildInitialLineStates,
   completeScrapeJob,
   failScrapeJob,
@@ -62,10 +63,10 @@ export type CaseExport = {
   }>
 }
 
+/** One section of case detail (VA GDC uses label/value grid cells). */
 type ExportedTable = {
   title?: string
-  headers?: string[]
-  rows: string[][]
+  fields: Array<{ label: string; value: string }>
 }
 
 const LANDING_URL = "https://eapps.courts.state.va.us/gdcourts/landing.do"
@@ -172,17 +173,19 @@ async function listCaseLinks(page: Page) {
   return links
 }
 
-async function exportAllTablesOnPage(page: Page): Promise<ExportedTable[]> {
-  // The case detail page is table-heavy. For a robust “export everything” approach,
-  // we serialize ALL visible <table> elements into:
-  // - optional title (from nearby headers)
-  // - headers (first row of <th>)
-  // - rows (all <tr> cells as text)
+/**
+ * Export only VA case-detail label/value pairs (e.g. td.labelgridtopleft + adjacent value cell).
+ * Avoids dumping every decorative table cell into Supabase.
+ */
+async function exportCaseDetailLabelValues(page: Page): Promise<ExportedTable[]> {
   return await page.evaluate(() => {
-    const norm = (s: string) => s.replace(/\s+/g, " ").trim()
+    const norm = (s: string) =>
+      String(s ?? "")
+        .replace(/\u00a0/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
 
     function guessTitle(table: HTMLTableElement): string | undefined {
-      // Try: closest preceding element that looks like a section header.
       const prev = table.closest("td")?.previousElementSibling
       const t1 = prev ? norm(prev.textContent ?? "") : ""
       if (t1) return t1
@@ -191,25 +194,40 @@ async function exportAllTablesOnPage(page: Page): Promise<ExportedTable[]> {
       return t2 || undefined
     }
 
+    function isLabelCell(el: Element): boolean {
+      const cn = (el as HTMLElement).className
+      return typeof cn === "string" && cn.includes("labelgrid")
+    }
+
     const tables = Array.from(document.querySelectorAll("table")).filter((t) => {
       const rect = (t as HTMLElement).getBoundingClientRect()
       return rect.width > 0 && rect.height > 0
     })
 
-    return tables.map((t) => {
+    const out: Array<{ title?: string; fields: Array<{ label: string; value: string }> }> = []
+
+    for (const t of tables) {
       const table = t as HTMLTableElement
-      const title = guessTitle(table)
+      const fields: Array<{ label: string; value: string }> = []
+      for (const tr of table.querySelectorAll("tr")) {
+        const cells = Array.from(tr.querySelectorAll("td, th"))
+        for (let i = 0; i < cells.length; i++) {
+          const td = cells[i]
+          if (!isLabelCell(td)) continue
+          const rawLabel = norm(td.textContent ?? "").replace(/:\s*$/, "")
+          const next = cells[i + 1]
+          const nextCn = next ? String((next as HTMLElement).className || "") : ""
+          const value =
+            next && !nextCn.includes("labelgrid") ? norm(next.textContent ?? "") : ""
+          if (!rawLabel && !value) continue
+          fields.push({ label: rawLabel, value })
+        }
+      }
+      if (fields.length === 0) continue
+      out.push({ title: guessTitle(table), fields })
+    }
 
-      const ths = Array.from(table.querySelectorAll("tr th")).map((th) => norm(th.textContent ?? ""))
-      const headers = ths.length > 0 ? ths : undefined
-
-      const rows = Array.from(table.querySelectorAll("tr")).map((tr) => {
-        const cells = Array.from(tr.querySelectorAll("th,td")).map((td) => norm(td.textContent ?? ""))
-        return cells.filter((c) => c !== "")
-      })
-
-      return { title, headers, rows: rows.filter((r) => r.length > 0) }
-    })
+    return out
   })
 }
 
@@ -281,9 +299,11 @@ export async function runVaGdcourtsFlow(
       ...linePatch,
       updated_at: now,
     }
+    const { progress_pct: _drop, ...restJob } = jobPatch
     await updateScrapeJob(progress.supabase, progress.jobId, {
       lines_state: lineStates,
-      ...jobPatch,
+      progress_pct: averageLineProgressPct(lineStates),
+      ...restJob,
     })
   }
 
@@ -292,19 +312,16 @@ export async function runVaGdcourtsFlow(
   for (let lineIdx = 0; lineIdx < rows.length; lineIdx++) {
     const row = rows[lineIdx]
     const lineNo = lineIdx + 1
-    const baseOverall = Math.round((lineIdx / Math.max(totalLines, 1)) * 100)
-
     await syncLine(
       lineIdx,
       {
         state: "searching",
         message: `Searching for line ${lineNo}`,
-        progress_pct: baseOverall,
+        progress_pct: 5,
       },
       {
         state: "searching",
         detail_message: `Searching for line ${lineNo}`,
-        progress_pct: baseOverall,
       }
     )
 
@@ -327,19 +344,17 @@ export async function runVaGdcourtsFlow(
     const linkCount = Math.max(links.length, 1)
 
     for (let i = 0; i < links.length; i++) {
-      const intra = (i + 1) / linkCount
-      const overall = Math.round(((lineIdx + intra) / Math.max(totalLines, 1)) * 100)
+      const linePct = Math.min(99, Math.round(15 + ((i + 1) / linkCount) * 80))
       await syncLine(
         lineIdx,
         {
           state: "scraping",
           message: `Scraping line ${lineNo} (case ${i + 1} of ${links.length})`,
-          progress_pct: Math.min(99, overall),
+          progress_pct: linePct,
         },
         {
           state: "scraping",
           detail_message: `Scraping line ${lineNo} (case ${i + 1})`,
-          progress_pct: Math.min(99, overall),
         }
       )
 
@@ -353,7 +368,7 @@ export async function runVaGdcourtsFlow(
       await page.waitForLoadState("domcontentloaded")
       await page.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => {})
 
-      const tables = await exportAllTablesOnPage(page)
+      const tables = await exportCaseDetailLabelValues(page)
       item.cases.push({
         caseIndex: i,
         caseIdText,
@@ -366,7 +381,6 @@ export async function runVaGdcourtsFlow(
       await page.waitForLoadState("networkidle", { timeout: 30_000 }).catch(() => {})
     }
 
-    const lineDonePct = Math.round(((lineIdx + 1) / Math.max(totalLines, 1)) * 100)
     await syncLine(
       lineIdx,
       {
@@ -377,7 +391,6 @@ export async function runVaGdcourtsFlow(
       {
         state: "running",
         detail_message: `Finished line ${lineNo} of ${totalLines}`,
-        progress_pct: lineDonePct,
       }
     )
 
