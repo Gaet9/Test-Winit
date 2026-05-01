@@ -224,12 +224,14 @@ def persist_worker_scrape_run(
         return
     sb = create_client(url, key)
     now = datetime.now(timezone.utc)
+    dispute_analysis = analyze_dispute_eligibility_for_run(results, now=now)
     row: dict[str, Any] = {
         "name": name,
         "run_date": now.date().isoformat(),
         "processed_at": now.isoformat(),
         "line_count": line_count,
         "results": results,
+        "dispute_analysis": dispute_analysis,
     }
     jid = (scrape_job_id or "").strip()
     if jid:
@@ -241,6 +243,226 @@ def persist_worker_scrape_run(
         f"persist_worker_scrape_run inserted name={name!r} export_lines={line_count} "
         f"case_blocks={len(results)} scrape_job_id={jid or '—'}"
     )
+
+
+def _norm_key(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").strip().lower())
+
+
+def _parse_date(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    raw = str(s).strip()
+    if not raw:
+        return None
+    # ISO-ish first
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        pass
+    # Common US formats
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+    return None
+
+
+def _pick_field(fields: list[dict[str, Any]], *label_keywords: str) -> Optional[str]:
+    want = {_norm_key(k) for k in label_keywords if k}
+    for f in fields:
+        lab = _norm_key(str(f.get("label") or ""))
+        if not lab:
+            continue
+        for k in want:
+            if k and k in lab:
+                v = str(f.get("value") or "").strip()
+                return v or None
+    return None
+
+
+def analyze_dispute_eligibility_for_case(fields: list[dict[str, Any]], *, now: datetime) -> dict[str, Any]:
+    # Extract relevant factors (best-effort; labels vary by jurisdiction).
+    status = _pick_field(fields, "Case Status", "Status") or "Unknown"
+    plea = _pick_field(fields, "Plea") or "Unknown"
+    disposition = _pick_field(fields, "Final Disposition", "Disposition", "Judgment", "Result") or "Unknown"
+    paid = _pick_field(fields, "Fine Paid", "Costs Paid", "Paid", "Payment") or "Unknown"
+    paid_date_raw = _pick_field(fields, "Fine/Costs Paid Date", "Paid Date", "Payment Date")
+    appearance = _pick_field(fields, "Appearance", "Appeared", "Failure to Appear", "FTA") or "Unknown"
+    case_type = _pick_field(fields, "Case Type", "Charge Type", "Offense") or "Unknown"
+    jurisdiction = _pick_field(fields, "Jurisdiction", "Court") or "Unknown"
+    hearing_date_raw = _pick_field(fields, "Hearing Date", "Court Date", "Trial Date", "Arraignment Date")
+    judgment_date_raw = _pick_field(fields, "Disposition Date", "Judgment Date", "Finalized Date", "Sentenced Date")
+
+    hearing_dt = _parse_date(hearing_date_raw)
+    judgment_dt = _parse_date(judgment_date_raw) or _parse_date(paid_date_raw)
+
+    status_l = str(status).lower()
+    plea_l = str(plea).lower()
+    disp_l = str(disposition).lower()
+    paid_l = str(paid).lower()
+    appearance_l = str(appearance).lower()
+
+    # Data integrity flags (minimal for now; can be extended when we have explicit mismatch signals).
+    data_flags: list[str] = []
+    missing_critical = []
+    for k, v in {
+        "status": status,
+        "plea": plea,
+        "disposition": disposition,
+        "hearing_date": hearing_date_raw,
+        "judgment_date": judgment_date_raw,
+        "payment": paid,
+    }.items():
+        if str(v).strip().lower() in ("", "unknown", "n/a", "na", "none", "null"):
+            missing_critical.append(k)
+    if missing_critical:
+        data_flags.append(f"missing:{','.join(missing_critical)}")
+
+    # Appeal window heuristic (default ~10 days).
+    appeal_deadline_days = 10
+    within_appeal = False
+    appeal_window = "Unknown"
+    if judgment_dt:
+        delta_days = (now - judgment_dt).total_seconds() / 86400.0
+        within_appeal = 0 <= delta_days <= appeal_deadline_days
+        appeal_window = "within_deadline" if within_appeal else "outside_deadline"
+
+    # Hearing timing.
+    hearing_timing = "unknown"
+    if hearing_dt:
+        hearing_timing = "future" if now < hearing_dt else "past_or_today"
+
+    # Classification rules (ordered with overrides).
+    classification = "NOT DISPUTABLE"
+    confidence = "MEDIUM"
+    reasoning: list[str] = []
+
+    # 1) Pending status => disputable
+    if "pending" in status_l or "open" in status_l or "active" in status_l:
+        classification = "DISPUTABLE"
+        confidence = "HIGH"
+        reasoning.append("Case status indicates it is still pending/open.")
+
+    # 2) Before hearing => disputable
+    if hearing_dt and now < hearing_dt:
+        classification = "DISPUTABLE"
+        confidence = "HIGH"
+        reasoning.append("Hearing date is in the future, so the case can still be contested.")
+
+    # 3) No plea + no disposition => disputable
+    if classification != "DISPUTABLE":
+        if ("unknown" in plea_l or "none" in plea_l or plea_l.strip() == "") and (
+            "unknown" in disp_l or disp_l.strip() == ""
+        ):
+            classification = "DISPUTABLE"
+            confidence = "MEDIUM"
+            reasoning.append("No recorded plea and no final disposition found.")
+
+    # 4) Disposition dismissed => not disputable
+    if "dismiss" in disp_l or "nolle" in disp_l or "prosequi" in disp_l:
+        classification = "NOT DISPUTABLE"
+        confidence = "HIGH"
+        reasoning.append("Final disposition indicates the matter was dismissed (nothing to dispute).")
+
+    # 5) Guilty => likely not, unless appeal window / exceptional relief
+    guilty_signal = "guilty" in plea_l or ("guilty" in disp_l and "not guilty" not in disp_l)
+    paid_signal = any(x in paid_l for x in ("yes", "paid", "true"))
+    missed_signal = (
+        "miss" in appearance_l
+        or "fta" in appearance_l
+        or "failure" in appearance_l
+        or "absentia" in disp_l  # e.g. "Guilty In Absentia"
+    )
+
+    if guilty_signal and classification != "DISPUTABLE":
+        reasoning.append("Guilty plea/disposition is a strong signal the case is finalized.")
+        if within_appeal:
+            classification = "CONDITIONALLY DISPUTABLE"
+            confidence = "MEDIUM"
+            reasoning.append(f"Judgment appears within ~{appeal_deadline_days}-day appeal window.")
+        else:
+            classification = "NOT DISPUTABLE"
+            confidence = "HIGH" if paid_signal else "MEDIUM"
+            if judgment_dt:
+                reasoning.append(f"Judgment appears outside ~{appeal_deadline_days}-day appeal window.")
+
+    # 6) Paid + guilty => not disputable
+    if paid_signal and guilty_signal:
+        classification = "NOT DISPUTABLE"
+        confidence = "HIGH"
+        reasoning.append("Fine/costs appear paid, which strongly indicates acceptance/closure.")
+
+    # 7) Missed appearance => conditionally disputable
+    if missed_signal and classification != "DISPUTABLE":
+        classification = "CONDITIONALLY DISPUTABLE"
+        confidence = "MEDIUM"
+        reasoning.append("Missed appearance/FTA may allow reopening under specific procedures.")
+
+    # 8) Missing critical info => conditional override (low confidence)
+    if missing_critical and classification != "DISPUTABLE":
+        classification = "CONDITIONALLY DISPUTABLE"
+        confidence = "LOW"
+        reasoning.append("Missing critical information; eligibility may depend on additional facts/documents.")
+
+    recommended_action = "Review case details and deadlines."
+    if classification == "DISPUTABLE":
+        recommended_action = "Prepare dispute/defense now (collect evidence, confirm hearing details)."
+    elif classification == "CONDITIONALLY DISPUTABLE":
+        recommended_action = "Check appeal/reopening eligibility urgently and gather supporting documents."
+    else:
+        recommended_action = "Consider limited options (appeal if timely) or focus on compliance/record review."
+
+    return {
+        "classification": classification,
+        "confidence": confidence,
+        "reasoning": reasoning[:8],
+        "key_factors": {
+            "status": status,
+            "plea": plea,
+            "disposition": disposition,
+            "appeal_window": appeal_window,
+            "payment": paid,
+            "hearing_timing": hearing_timing,
+            "appearance": appearance,
+            "case_type": case_type,
+            "jurisdiction": jurisdiction,
+            "data_integrity_flags": data_flags,
+        },
+        "recommended_action": recommended_action,
+    }
+
+
+def analyze_dispute_eligibility_for_run(results: list[dict[str, Any]], *, now: datetime) -> list[dict[str, Any]]:
+    """
+    Produce per-line analysis aligned with `results`:
+    [
+      { lineIndex, row, cases: [{ caseIndex, caseIdText, analysis }] }
+    ]
+    """
+    out: list[dict[str, Any]] = []
+    for li, item in enumerate(results or []):
+        row = item.get("row") if isinstance(item, dict) else None
+        cases = item.get("cases") if isinstance(item, dict) else None
+        case_arr = list(cases) if isinstance(cases, list) else []
+        analyzed_cases: list[dict[str, Any]] = []
+        for c in case_arr:
+            if not isinstance(c, dict):
+                continue
+            tables = c.get("tables")
+            t0 = (tables[0] if isinstance(tables, list) and tables else {}) if tables is not None else {}
+            fields = t0.get("fields") if isinstance(t0, dict) else None
+            fields_arr = list(fields) if isinstance(fields, list) else []
+            analyzed_cases.append(
+                {
+                    "caseIndex": c.get("caseIndex"),
+                    "caseIdText": c.get("caseIdText"),
+                    "analysis": analyze_dispute_eligibility_for_case(fields_arr, now=now),
+                }
+            )
+        out.append({"lineIndex": li + 1, "row": row, "cases": analyzed_cases})
+    return out
 
 
 def iso_now() -> str:

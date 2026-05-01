@@ -12,6 +12,7 @@ type RunRow = {
   processed_at: string
   results: unknown
   scrape_job_id?: string | null
+  dispute_analysis?: unknown
 }
 
 /** Full run row from DB (for detail UI). */
@@ -21,6 +22,7 @@ export type WorkerScrapeRunArchive = {
   processed_at: string
   results: unknown
   scrape_job_id?: string | null
+  dispute_analysis?: unknown
 }
 
 export type WorkerScrapeRunLatest = {
@@ -39,7 +41,7 @@ export async function fetchScrapeArchiveBundle(
 ): Promise<{ lines: ScrapeResultLineRow[]; runs: WorkerScrapeRunArchive[] }> {
   const { data, error } = await supabase
     .from("worker_scrape_runs")
-    .select("id,name,processed_at,results,scrape_job_id")
+    .select("id,name,processed_at,results,scrape_job_id,dispute_analysis")
     .order("processed_at", { ascending: false })
     .limit(runLimit)
 
@@ -54,6 +56,7 @@ export async function fetchScrapeArchiveBundle(
     processed_at: run.processed_at,
     results: run.results,
     scrape_job_id: run.scrape_job_id ?? null,
+    dispute_analysis: run.dispute_analysis,
   }))
 
   const lines: ScrapeResultLineRow[] = []

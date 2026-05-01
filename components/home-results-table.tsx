@@ -52,18 +52,50 @@ function badgeVariant(state: string): "default" | "secondary" | "destructive" | 
     return "outline";
 }
 
+function disputeVariant(classification: string | null | undefined): "default" | "secondary" | "destructive" | "outline" {
+    const c = (classification ?? "").toLowerCase();
+    if (c === "disputable") return "default";
+    if (c === "conditionally disputable") return "secondary";
+    if (c === "not disputable") return "destructive";
+    return "outline";
+}
+
+function resolveLineDisputeClassification(
+    r: ScrapeResultLineRow,
+    archiveRuns: WorkerScrapeRunArchive[],
+): string | null {
+    if (r.source !== "archive") return null;
+    const run = archiveRuns.find((x) => x.id === r.runId);
+    if (!run) return null;
+    const arr = (run.dispute_analysis as unknown) as unknown[];
+    if (!Array.isArray(arr)) return null;
+    const line = arr[r.lineIndex - 1] as Record<string, unknown> | undefined;
+    const cases = (line && (line.cases as unknown)) as unknown[] | undefined;
+    if (!Array.isArray(cases) || cases.length === 0) return null;
+    const classes = cases
+        .map((c) => (c as Record<string, unknown>)?.analysis as Record<string, unknown> | undefined)
+        .map((a) => (a?.classification as string | undefined) ?? "")
+        .filter(Boolean);
+    if (!classes.length) return null;
+    if (classes.some((x) => x === "DISPUTABLE")) return "DISPUTABLE";
+    if (classes.some((x) => x === "CONDITIONALLY DISPUTABLE")) return "CONDITIONALLY DISPUTABLE";
+    return "NOT DISPUTABLE";
+}
+
 function ResultsSection({
     title,
     description,
     rows,
     emptyHint,
     onRowClick,
+    archiveRuns,
 }: {
     title: string;
     description: string;
     rows: ScrapeResultLineRow[];
     emptyHint: string;
     onRowClick: (r: ScrapeResultLineRow) => void;
+    archiveRuns: WorkerScrapeRunArchive[];
 }) {
     return (
         <section className='space-y-2'>
@@ -71,55 +103,68 @@ function ResultsSection({
                 <h3 className='text-sm font-semibold text-foreground'>{title}</h3>
                 <p className='text-xs text-muted-foreground'>{description}</p>
             </div>
-            <Table>
-                <TableCaption>{rows.length ? `${rows.length} row(s). Click a row for full export detail.` : emptyHint}</TableCaption>
-                <TableHeader>
-                    <TableRow>
-                        <TableHead>Source</TableHead>
-                        <TableHead>Run / line</TableHead>
-                        <TableHead>Label</TableHead>
-                        <TableHead>State</TableHead>
-                        <TableHead className='text-right w-24'>Progress</TableHead>
-                        <TableHead>Detail</TableHead>
-                        <TableHead>Updated</TableHead>
-                    </TableRow>
-                </TableHeader>
-                <TableBody>
-                    {rows.map((r) => (
-                        <TableRow
-                            key={r.key}
-                            role='button'
-                            tabIndex={0}
-                            className='cursor-pointer hover:bg-muted/60'
-                            onClick={() => onRowClick(r)}
-                            onKeyDown={(e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                    e.preventDefault();
-                                    onRowClick(r);
-                                }
-                            }}
-                        >
-                            <TableCell className='text-muted-foreground text-xs capitalize'>{r.source}</TableCell>
-                            <TableCell className='font-mono text-xs'>
-                                {r.runName}
-                                <br />
-                                <span className='text-muted-foreground'>#{r.lineIndex}</span>
-                            </TableCell>
-                            <TableCell className='max-w-[200px] truncate'>{r.lineLabel}</TableCell>
-                            <TableCell>
-                                <Badge variant={badgeVariant(r.state)}>{r.state}</Badge>
-                            </TableCell>
-                            <TableCell className='text-right tabular-nums'>{r.progressPct}%</TableCell>
-                            <TableCell className='max-w-[280px] truncate text-muted-foreground text-sm'>
-                                {r.message || "—"}
-                            </TableCell>
-                            <TableCell className='text-xs text-muted-foreground whitespace-nowrap'>
-                                {new Date(r.updatedAt).toLocaleString()}
-                            </TableCell>
+            <div className='w-full overflow-x-auto rounded-md border'>
+                <Table className='min-w-[720px]'>
+                    <TableCaption>
+                        {rows.length ? `${rows.length} row(s). Click a row for full export detail.` : emptyHint}
+                    </TableCaption>
+                    <TableHeader>
+                        <TableRow>
+                            <TableHead className='hidden sm:table-cell'>Source</TableHead>
+                            <TableHead>Run / line</TableHead>
+                            <TableHead>Label</TableHead>
+                            <TableHead className='hidden sm:table-cell'>Dispute</TableHead>
+                            <TableHead>State</TableHead>
+                            <TableHead className='text-right w-24'>Progress</TableHead>
+                            <TableHead className='hidden md:table-cell'>Detail</TableHead>
+                            <TableHead className='hidden lg:table-cell'>Updated</TableHead>
                         </TableRow>
-                    ))}
-                </TableBody>
-            </Table>
+                    </TableHeader>
+                    <TableBody>
+                        {rows.map((r) => (
+                            <TableRow
+                                key={r.key}
+                                role='button'
+                                tabIndex={0}
+                                className='cursor-pointer hover:bg-muted/60'
+                                onClick={() => onRowClick(r)}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        onRowClick(r);
+                                    }
+                                }}
+                            >
+                                <TableCell className='hidden sm:table-cell text-muted-foreground text-xs capitalize'>
+                                    {r.source}
+                                </TableCell>
+                                <TableCell className='font-mono text-xs whitespace-nowrap'>
+                                    {r.runName}
+                                    <br />
+                                    <span className='text-muted-foreground'>#{r.lineIndex}</span>
+                                </TableCell>
+                                <TableCell className='max-w-[220px] sm:max-w-[320px] truncate'>{r.lineLabel}</TableCell>
+                                <TableCell className='hidden sm:table-cell'>
+                                    {(() => {
+                                        const c = resolveLineDisputeClassification(r, archiveRuns);
+                                        return <Badge variant={disputeVariant(c)}>{c ?? "—"}</Badge>;
+                                    })()}
+                                </TableCell>
+                                <TableCell>
+                                    <Badge variant={badgeVariant(r.state)}>{r.state}</Badge>
+                                </TableCell>
+                                <TableCell className='text-right tabular-nums whitespace-nowrap'>{r.progressPct}%</TableCell>
+                                <TableCell className='hidden md:table-cell max-w-[320px] truncate text-muted-foreground text-sm'>
+                                    {r.message || "—"}
+                                </TableCell>
+                                <TableCell className='hidden lg:table-cell text-xs text-muted-foreground whitespace-nowrap'>
+                                    {new Date(r.updatedAt).toLocaleString()}
+                                </TableCell>
+                            </TableRow>
+                        ))}
+                    </TableBody>
+                </Table>
+            </div>
         </section>
     );
 }
@@ -328,6 +373,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
                     rows={currentRows}
                     emptyHint='No current activity. Start a scrape or wait for an archive row in the window below after a run completes.'
                     onRowClick={setDetailRow}
+                    archiveRuns={archiveRuns}
                 />
                 <ResultsSection
                     title='Previously exported'
@@ -335,6 +381,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
                     rows={passedRows}
                     emptyHint='No older exports in view.'
                     onRowClick={setDetailRow}
+                    archiveRuns={archiveRuns}
                 />
             </div>
 
