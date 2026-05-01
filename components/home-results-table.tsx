@@ -51,7 +51,10 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
 
   React.useEffect(() => {
     const id = focusJobId?.trim()
-    if (id) setJobIdOverride(id)
+    if (!id) return
+    queueMicrotask(() => {
+      setJobIdOverride(id)
+    })
   }, [focusJobId])
 
   const load = React.useCallback(async () => {
@@ -69,20 +72,26 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
   }, [])
 
   React.useEffect(() => {
-    void load()
+    queueMicrotask(() => {
+      void load()
+    })
   }, [load])
 
   const watchJobId = jobIdOverride.trim() || liveJob?.id || null
 
   React.useEffect(() => {
     if (!watchJobId || !configured) {
-      setSseStatus("idle")
+      queueMicrotask(() => {
+        setSseStatus("idle")
+      })
       return
     }
 
     const url = `/api/scrape-jobs/${watchJobId}/sse`
     const es = new EventSource(url)
-    setSseStatus("open")
+    queueMicrotask(() => {
+      setSseStatus("open")
+    })
 
     es.onmessage = (ev) => {
       try {
