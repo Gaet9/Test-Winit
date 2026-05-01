@@ -198,6 +198,16 @@ async function exportCaseDetailLabelValues(page: Page): Promise<ExportedTable[]>
       return /:\s*$/.test(t)
     }
 
+    function pushField(labelRaw: string, valueRaw: string) {
+      const label = norm(labelRaw).replace(/:\s*$/, "")
+      const value = norm(valueRaw)
+      if (!label || !value) return
+      const k = `${label}\u0000${value}`
+      if (seen.has(k)) return
+      seen.add(k)
+      mergedFields.push({ label, value })
+    }
+
     const tables = Array.from(document.querySelectorAll("table")).filter((t) => {
       const rect = (t as HTMLElement).getBoundingClientRect()
       return rect.width > 0 && rect.height > 0
@@ -214,18 +224,29 @@ async function exportCaseDetailLabelValues(page: Page): Promise<ExportedTable[]>
         const cells = Array.from(tr.querySelectorAll("td, th"))
         for (let i = 0; i < cells.length; i++) {
           const td = cells[i]
-          if (!isLabelCell(td)) continue
-          const rawLabel = norm(td.textContent ?? "").replace(/:\s*$/, "")
-          const next = cells[i + 1]
-          const valueCandidate = next && !looksLikeAnotherLabelCell(next) ? norm(next.textContent ?? "") : ""
-          const value = valueCandidate
+          const text = norm(td.textContent ?? "")
 
-          // Reduce noise: skip empty values, and avoid repeated pairs.
-          if (!rawLabel || !value) continue
-          const k = `${rawLabel}\u0000${value}`
-          if (seen.has(k)) continue
-          seen.add(k)
-          mergedFields.push({ label: rawLabel, value })
+          // Primary: labelgrid layouts (traffic/criminal detail pages)
+          if (isLabelCell(td)) {
+            const rawLabel = text.replace(/:\s*$/, "")
+            const next = cells[i + 1]
+            const value = next && !looksLikeAnotherLabelCell(next) ? norm(next.textContent ?? "") : ""
+            pushField(rawLabel, value)
+            continue
+          }
+
+          // Fallback: civil layouts often have "Label : Value" without labelgrid classes,
+          // sometimes with multiple pairs on one row (e.g. Case Number : X  Filed Date : Y).
+          if (text.includes(":")) {
+            const parts = text.split(":")
+            if (parts.length >= 2) {
+              const label = parts[0] ?? ""
+              const inlineValue = parts.slice(1).join(":")
+              const value = norm(inlineValue) || norm(cells[i + 1]?.textContent ?? "")
+              pushField(label, value)
+              continue
+            }
+          }
         }
       }
     }
@@ -392,6 +413,7 @@ export async function runVaGdcourtsFlow(
         state: "scraping_complete",
         message: `Line ${lineNo} complete (${item.cases.length} case(s))`,
         progress_pct: 100,
+        export: item,
       },
       {
         state: "running",

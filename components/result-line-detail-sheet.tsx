@@ -47,6 +47,26 @@ function isRecord(v: unknown): v is Record<string, unknown> {
     return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+function resolveArchiveLineSummary(
+    row: ScrapeResultLineRow,
+    runs: WorkerScrapeRunArchive[],
+): DisputeAnalysis | null {
+    if (row.source !== "archive") return null;
+    const run = runs.find((r) => r.id === row.runId);
+    if (!run) return null;
+    const arr = run.dispute_analysis;
+    if (!Array.isArray(arr)) return null;
+    const line = arr[row.lineIndex - 1];
+    if (!isRecord(line)) return null;
+    const cases = line.cases;
+    if (!Array.isArray(cases) || cases.length === 0) return null;
+    const analyses = cases
+        .map((c) => (isRecord(c) ? (c.analysis as unknown) : null))
+        .filter((a) => isRecord(a)) as DisputeAnalysis[];
+    const pick = (cls: DisputeAnalysis["classification"]) => analyses.find((a) => a.classification === cls) ?? null;
+    return pick("DISPUTABLE") ?? pick("CONDITIONALLY DISPUTABLE") ?? pick("NOT DISPUTABLE") ?? null;
+}
+
 function resolveArchiveCaseAnalysis(
     row: ScrapeResultLineRow,
     runs: WorkerScrapeRunArchive[],
@@ -98,6 +118,19 @@ function resolveLiveLineState(row: ScrapeResultLineRow, job: WorkerScrapeJobRow 
     return lines.find((l) => l.lineIndex === row.lineIndex) ?? null;
 }
 
+function resolveLiveLineExport(line: unknown): VaLineExport | null {
+    if (!isRecord(line)) return null;
+    const ex = line.export;
+    if (!isRecord(ex)) return null;
+    const casesRaw = ex.cases;
+    const cases: VaCase[] = Array.isArray(casesRaw) ? casesRaw.map((c) => (isRecord(c) ? (c as unknown as VaCase) : {})) : [];
+    return {
+        row: isRecord(ex.row) ? ex.row : {},
+        searchedAt: typeof ex.searchedAt === "string" ? ex.searchedAt : undefined,
+        cases,
+    };
+}
+
 function badgeVariant(state: string): "default" | "secondary" | "destructive" | "outline" {
     const s = state.toLowerCase();
     if (s === "scraping_complete" || s === "succeeded") return "default";
@@ -124,6 +157,16 @@ export function ResultLineDetailSheet(props: {
         if (!row || row.source !== "live") return null;
         return resolveLiveLineState(row, liveJob);
     }, [row, liveJob]);
+
+    const liveExport = React.useMemo(() => {
+        if (!row || row.source !== "live" || !liveLine) return null;
+        return resolveLiveLineExport(liveLine);
+    }, [row, liveLine]);
+
+    const lineAnalysis = React.useMemo(() => {
+        if (!row) return null;
+        return resolveArchiveLineSummary(row, archiveRuns);
+    }, [row, archiveRuns]);
 
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
@@ -154,6 +197,31 @@ export function ResultLineDetailSheet(props: {
                                 <p className='text-sm text-muted-foreground'>{row.message}</p>
                             :   null}
 
+                            {row.source === "archive" && lineAnalysis ?
+                                <>
+                                    <Separator />
+                                    <Card>
+                                        <CardHeader className='pb-2'>
+                                            <CardTitle className='text-base'>Dispute eligibility (summary)</CardTitle>
+                                            <CardDescription>Applies to this result line</CardDescription>
+                                        </CardHeader>
+                                        <CardContent className='space-y-2 text-sm'>
+                                            <div className='flex flex-wrap items-center gap-2'>
+                                                <Badge variant={disputeBadgeVariant(lineAnalysis.classification)}>
+                                                    {lineAnalysis.classification}
+                                                </Badge>
+                                                <span className='text-xs text-muted-foreground'>Confidence: {lineAnalysis.confidence}</span>
+                                            </div>
+                                            {lineAnalysis.recommended_action ?
+                                                <p className='text-sm'>
+                                                    <span className='text-muted-foreground'>Recommended:</span> {lineAnalysis.recommended_action}
+                                                </p>
+                                            :   null}
+                                        </CardContent>
+                                    </Card>
+                                </>
+                            :   null}
+
                             {row.source === "live" && liveJob && liveLine ?
                                 <>
                                     <Separator />
@@ -171,11 +239,22 @@ export function ResultLineDetailSheet(props: {
                                             <p>
                                                 <span className='text-muted-foreground'>Line progress:</span> {liveLine.progress_pct}%
                                             </p>
-                                            <p className='text-xs text-muted-foreground'>
-                                                Full case exports appear here after the job finishes and the row is archived.
-                                            </p>
+                                            {liveExport ?
+                                                <p className='text-xs text-muted-foreground'>
+                                                    Line export is available (this line finished). See below for extracted case detail.
+                                                </p>
+                                            :   <p className='text-xs text-muted-foreground'>
+                                                    Full case exports appear here as each line completes (no need to wait for the whole job).
+                                                </p>}
                                         </CardContent>
                                     </Card>
+                                </>
+                            :   null}
+
+                            {row.source === "live" && liveExport ?
+                                <>
+                                    <Separator />
+                                    <ArchiveExportBody data={liveExport} runName={row.runName} row={row} archiveRuns={archiveRuns} />
                                 </>
                             :   null}
 

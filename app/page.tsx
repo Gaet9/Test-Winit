@@ -32,11 +32,6 @@ export default function Home() {
     const fileInputRef = React.useRef<HTMLInputElement>(null);
 
     const total = csvRows.length;
-    const done = 0;
-    const running = 0;
-    const queued = total;
-    const blocked = 0;
-    const pct = 0;
 
     const processFile = React.useCallback(async (file: File) => {
         if (!file.name.toLowerCase().endsWith(".csv")) {
@@ -240,51 +235,6 @@ export default function Home() {
                                 </div>
                             </CardContent>
                         </Card>
-
-                        <div className='grid gap-4 md:grid-cols-4'>
-                            <Card size='sm'>
-                                <CardHeader className='border-b'>
-                                    <CardTitle>Progress</CardTitle>
-                                    <CardDescription>{total ? `${pct}% complete` : "No CSV loaded"}</CardDescription>
-                                </CardHeader>
-                                <CardContent>
-                                    <div className='mt-1 text-2xl font-semibold'>
-                                        {done}/{total}
-                                    </div>
-                                    <p className='text-xs text-muted-foreground'>Succeeded + failed out of total</p>
-                                </CardContent>
-                            </Card>
-                            <Card size='sm'>
-                                <CardHeader className='border-b'>
-                                    <CardTitle>Running</CardTitle>
-                                    <CardDescription>Active workers</CardDescription>
-                                </CardHeader>
-                                <CardContent>
-                                    <div className='mt-1 text-2xl font-semibold'>{running}</div>
-                                    <p className='text-xs text-muted-foreground'>Tickets currently being scraped</p>
-                                </CardContent>
-                            </Card>
-                            <Card size='sm'>
-                                <CardHeader className='border-b'>
-                                    <CardTitle>Queued</CardTitle>
-                                    <CardDescription>Ready from CSV</CardDescription>
-                                </CardHeader>
-                                <CardContent>
-                                    <div className='mt-1 text-2xl font-semibold'>{queued}</div>
-                                    <p className='text-xs text-muted-foreground'>Validated rows waiting to start</p>
-                                </CardContent>
-                            </Card>
-                            <Card size='sm'>
-                                <CardHeader className='border-b'>
-                                    <CardTitle>Blocked</CardTitle>
-                                    <CardDescription>Rate-limit / CAPTCHA</CardDescription>
-                                </CardHeader>
-                                <CardContent>
-                                    <div className='mt-1 text-2xl font-semibold'>{blocked}</div>
-                                    <p className='text-xs text-muted-foreground'>Backoff or manual review</p>
-                                </CardContent>
-                            </Card>
-                        </div>
                     </TabsContent>
 
                     <TabsContent value='results' className='space-y-4'>

@@ -33,4 +33,6 @@ export type LineProgressState = {
   message: string
   progress_pct: number
   updated_at: string
+  /** Optional per-line export payload (so details are viewable before the whole run completes). */
+  export?: unknown
 }

@@ -82,6 +82,50 @@ function resolveLineDisputeClassification(
     return "NOT DISPUTABLE";
 }
 
+function resolveLineDisputeSummary(
+    r: ScrapeResultLineRow,
+    archiveRuns: WorkerScrapeRunArchive[],
+): { classification: string; recommended_action: string } | null {
+    if (r.source !== "archive") return null;
+    const run = archiveRuns.find((x) => x.id === r.runId);
+    if (!run) return null;
+    const arr = run.dispute_analysis as unknown;
+    if (!Array.isArray(arr)) return null;
+    const line = arr[r.lineIndex - 1] as Record<string, unknown> | undefined;
+    const cases = (line && (line.cases as unknown)) as unknown[] | undefined;
+    if (!Array.isArray(cases) || cases.length === 0) return null;
+
+    const analyses = cases
+        .map((c) => (c as Record<string, unknown>)?.analysis as Record<string, unknown> | undefined)
+        .filter(Boolean);
+    if (!analyses.length) return null;
+
+    const pick = (cls: string) =>
+        analyses.find((a) => (a?.classification as string | undefined) === cls) ?? null;
+
+    const best =
+        pick("DISPUTABLE") ??
+        pick("CONDITIONALLY DISPUTABLE") ??
+        pick("NOT DISPUTABLE") ??
+        null;
+    if (!best) return null;
+
+    const classification = (best.classification as string | undefined) ?? "";
+    const recommended_action = (best.recommended_action as string | undefined) ?? "";
+    if (!classification) return null;
+    return { classification, recommended_action };
+}
+
+function resolveArchiveLineExportItem(r: ScrapeResultLineRow, archiveRuns: WorkerScrapeRunArchive[]): Record<string, unknown> | null {
+    if (r.source !== "archive") return null;
+    const run = archiveRuns.find((x) => x.id === r.runId);
+    if (!run) return null;
+    const arr = run.results as unknown;
+    if (!Array.isArray(arr)) return null;
+    const item = arr[r.lineIndex - 1] as unknown;
+    return typeof item === "object" && item !== null ? (item as Record<string, unknown>) : null;
+}
+
 function resolveArchiveLineCaseCount(r: ScrapeResultLineRow, archiveRuns: WorkerScrapeRunArchive[]): number | null {
     if (r.source !== "archive") return null;
     const run = archiveRuns.find((x) => x.id === r.runId);
@@ -239,7 +283,7 @@ function ResultsSection({
                             <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("label")}>
                                 Label
                             </TableHead>
-                            <TableHead className='hidden sm:table-cell cursor-pointer select-none' onClick={() => toggleSort("dispute")}>
+                            <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("dispute")}>
                                 Dispute
                             </TableHead>
                             <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("state")}>
@@ -280,10 +324,18 @@ function ResultsSection({
                                     <span className='text-muted-foreground'>#{r.lineIndex}</span>
                                 </TableCell>
                                 <TableCell className='max-w-[220px] sm:max-w-[320px] truncate'>{r.lineLabel}</TableCell>
-                                <TableCell className='hidden sm:table-cell'>
+                                <TableCell className='max-w-[260px]'>
                                     {(() => {
-                                        const c = resolveLineDisputeClassification(r, archiveRuns);
-                                        return <Badge variant={disputeVariant(c)}>{c ?? "—"}</Badge>;
+                                        const s = resolveLineDisputeSummary(r, archiveRuns);
+                                        if (!s) return <span className='text-muted-foreground'>—</span>;
+                                        return (
+                                            <div className='space-y-1'>
+                                                <Badge variant={disputeVariant(s.classification)}>{s.classification}</Badge>
+                                                {s.recommended_action ?
+                                                    <p className='text-xs text-muted-foreground line-clamp-2'>{s.recommended_action}</p>
+                                                :   null}
+                                            </div>
+                                        );
                                     })()}
                                 </TableCell>
                                 <TableCell>
@@ -473,18 +525,27 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
     }, [visiblePassed, passedRows.length, maybeFetchMore]);
 
     const rowToExportFields = React.useCallback(
-        (r: ScrapeResultLineRow) => ({
+        (r: ScrapeResultLineRow) => {
+            const dispute = resolveLineDisputeSummary(r, archiveRuns);
+            const issue = resolveLineIssueKind(r);
+            const caseCount = resolveArchiveLineCaseCount(r, archiveRuns);
+            return {
             section: isCurrentExportRow(r, partitionNow) ? "current" : "passed",
             source: r.source,
             runName: r.runName,
             lineIndex: r.lineIndex,
             lineLabel: r.lineLabel,
+            disputeClassification: dispute?.classification ?? "",
+            disputeRecommendedAction: dispute?.recommended_action ?? "",
+            caseCount: caseCount ?? "",
+            issueKind: issue ?? "",
             state: r.state,
             progressPct: r.progressPct,
             message: r.message,
             updatedAt: r.updatedAt,
-        }),
-        [partitionNow],
+            };
+        },
+        [partitionNow, archiveRuns],
     );
 
     const exportCsv = React.useCallback(() => {
@@ -494,12 +555,21 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
     }, [displayRows, rowToExportFields]);
 
     const exportJson = React.useCallback(() => {
+        const enrichedRows = displayRows.map((r) => {
+            const base = rowToExportFields(r);
+            return {
+                ...base,
+                archiveDetail: resolveArchiveLineExportItem(r, archiveRuns),
+            };
+        });
         const payload = {
             exportedAt: new Date().toISOString(),
             currentExportWindowMinutes: 15,
             tableRowsCurrent: currentRows,
             tableRowsPassed: passedRows,
             tableRows: displayRows,
+            exportedRows: enrichedRows,
+            archiveRuns: archiveRuns,
             latestWorkerRun: latestRun,
         };
         triggerDownload(
@@ -507,7 +577,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
             "application/json;charset=utf-8",
             JSON.stringify(payload, null, 2),
         );
-    }, [currentRows, passedRows, displayRows, latestRun]);
+    }, [currentRows, passedRows, displayRows, latestRun, archiveRuns, rowToExportFields]);
 
     return (
         <div className='space-y-3'>
@@ -517,7 +587,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
                 </p>
             :   null}
 
-            <div className='flex flex-col gap-2 sm:flex-row sm:items-end'>
+            <div className='grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end'>
                 <div className='flex-1 space-y-1'>
                     <Label htmlFor='job-sse-id'>Watch job (optional)</Label>
                     <Input
@@ -528,7 +598,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
                     />
                     <p className='text-xs text-muted-foreground'>Live updates (SSE): {sseStatus}</p>
                 </div>
-                <div className='flex flex-wrap gap-2'>
+                <div className='flex flex-wrap gap-2 sm:justify-end'>
                     <Button type='button' variant='outline' onClick={() => void loadInitial()}>
                         Refresh results
                     </Button>

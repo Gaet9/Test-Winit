@@ -158,21 +158,38 @@ _EXPORT_CASE_DETAIL_FIELDS_JS = r"""() => {
   // Keep payload compact: merge all label/value fields across all tables into one list.
   const fields = [];
   const seen = new Set();
+  function pushField(labelRaw, valueRaw) {
+    const label = norm(labelRaw).replace(/:\s*$/, "");
+    const value = norm(valueRaw);
+    if (!label || !value) return;
+    const k = `${label}\u0000${value}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    fields.push({ label, value });
+  }
   for (const table of tables) {
     for (const tr of table.querySelectorAll("tr")) {
       const cells = Array.from(tr.querySelectorAll("td, th"));
       for (let i = 0; i < cells.length; i++) {
         const td = cells[i];
-        if (!isLabelCell(td)) continue;
-        let rawLabel = norm(td.textContent);
-        rawLabel = rawLabel.replace(/:\s*$/, "");
-        const next = cells[i + 1];
-        const value = next && !looksLikeAnotherLabelCell(next) ? norm(next.textContent) : "";
-        if (!rawLabel || !value) continue;
-        const k = `${rawLabel}\u0000${value}`;
-        if (seen.has(k)) continue;
-        seen.add(k);
-        fields.push({ label: rawLabel, value });
+        const text = norm(td.textContent || "");
+        if (isLabelCell(td)) {
+          const rawLabel = text.replace(/:\s*$/, "");
+          const next = cells[i + 1];
+          const value = next && !looksLikeAnotherLabelCell(next) ? norm(next.textContent) : "";
+          pushField(rawLabel, value);
+          continue;
+        }
+        if (text.includes(":")) {
+          const parts = text.split(":");
+          if (parts.length >= 2) {
+            const label = parts[0] || "";
+            const inlineValue = parts.slice(1).join(":");
+            const value = norm(inlineValue) || norm((cells[i + 1] && cells[i + 1].textContent) || "");
+            pushField(label, value);
+            continue;
+          }
+        }
       }
     }
   }
@@ -1191,6 +1208,7 @@ async def scrape_one_row(
                 "state": "scraping_complete",
                 "message": f"Line {line_no} complete ({len(item['cases'])} case(s))",
                 "progress_pct": 100,
+                "export": item,
             },
             {
                 "state": "running",
