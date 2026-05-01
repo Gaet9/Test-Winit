@@ -1,11 +1,13 @@
 "use client"
 
 import * as React from "react"
+import Papa from "papaparse"
 
 import type {
   ScrapeResultLineRow,
   WorkerScrapeJobRow,
 } from "@/types/scrape-result-line"
+import type { WorkerScrapeRunLatest } from "@/lib/scrape-results-query"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -21,6 +23,16 @@ import {
 } from "@/components/ui/table"
 import { jobLinesToResultRows } from "@/lib/scrape-result-mappers"
 
+function triggerDownload(filename: string, mime: string, body: string) {
+  const blob = new Blob([body], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function badgeVariant(state: string): "default" | "secondary" | "destructive" | "outline" {
   const s = state.toLowerCase()
   if (s === "scraping_complete" || s === "succeeded") return "default"
@@ -31,6 +43,7 @@ function badgeVariant(state: string): "default" | "secondary" | "destructive" | 
 
 export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } = {}) {
   const [archive, setArchive] = React.useState<ScrapeResultLineRow[]>([])
+  const [latestRun, setLatestRun] = React.useState<WorkerScrapeRunLatest | null>(null)
   const [configured, setConfigured] = React.useState(true)
   const [liveJob, setLiveJob] = React.useState<WorkerScrapeJobRow | null>(null)
   const [jobIdOverride, setJobIdOverride] = React.useState("")
@@ -46,11 +59,13 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
     const body = (await res.json()) as {
       archive: ScrapeResultLineRow[]
       activeJob: WorkerScrapeJobRow | null
+      latestRun?: WorkerScrapeRunLatest | null
       configured?: boolean
     }
     setConfigured(body.configured !== false)
     setArchive(body.archive ?? [])
     setLiveJob(body.activeJob ?? null)
+    setLatestRun(body.latestRun ?? null)
   }, [])
 
   React.useEffect(() => {
@@ -101,8 +116,41 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
     }
   }, [watchJobId, configured, load])
 
-  const liveRows = liveJob ? jobLinesToResultRows(liveJob) : []
-  const displayRows = [...liveRows, ...archive]
+  const liveRows = React.useMemo(
+    () => (liveJob ? jobLinesToResultRows(liveJob) : []),
+    [liveJob]
+  )
+  const displayRows = React.useMemo(() => [...liveRows, ...archive], [liveRows, archive])
+
+  const exportCsv = React.useCallback(() => {
+    if (!displayRows.length) return
+    const csv = Papa.unparse(
+      displayRows.map((r) => ({
+        source: r.source,
+        runName: r.runName,
+        lineIndex: r.lineIndex,
+        lineLabel: r.lineLabel,
+        state: r.state,
+        progressPct: r.progressPct,
+        message: r.message,
+        updatedAt: r.updatedAt,
+      }))
+    )
+    triggerDownload(`scrape-results-${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`, "text/csv;charset=utf-8", csv)
+  }, [displayRows])
+
+  const exportJson = React.useCallback(() => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      tableRows: displayRows,
+      latestWorkerRun: latestRun,
+    }
+    triggerDownload(
+      `scrape-export-${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.json`,
+      "application/json;charset=utf-8",
+      JSON.stringify(payload, null, 2)
+    )
+  }, [displayRows, latestRun])
 
   return (
     <div className="space-y-3">
@@ -129,9 +177,22 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
             <span className="font-mono">SUPABASE_SERVICE_ROLE_KEY</span>.
           </p>
         </div>
-        <Button type="button" variant="outline" onClick={() => void load()}>
-          Refresh results
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" onClick={() => void load()}>
+            Refresh results
+          </Button>
+          <Button type="button" variant="outline" disabled={!displayRows.length} onClick={exportCsv}>
+            Export CSV
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!displayRows.length && !latestRun}
+            onClick={exportJson}
+          >
+            Export JSON
+          </Button>
+        </div>
       </div>
 
       {liveJob ? (

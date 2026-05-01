@@ -299,19 +299,11 @@ export default function Home() {
                             <CardContent>
                                 <HomeResultsTable focusJobId={sseFocusJobId} />
                             </CardContent>
-                            <CardFooter className='justify-between'>
+                            <CardFooter>
                                 <p className='text-xs text-muted-foreground'>
-                                    Worker prints <code className='rounded bg-muted px-1'>job_started</code> JSON with{" "}
-                                    <code className='rounded bg-muted px-1'>ssePath</code> for this app origin.
+                                    Use Export CSV / Export JSON above the results table. JSON includes the latest archived{" "}
+                                    <code className='rounded bg-muted px-1'>worker_scrape_runs</code> payload when available.
                                 </p>
-                                <div className='flex items-center gap-2'>
-                                    <Button variant='outline' type='button' disabled>
-                                        Export CSV
-                                    </Button>
-                                    <Button variant='outline' type='button' disabled>
-                                        Export JSON
-                                    </Button>
-                                </div>
                             </CardFooter>
                         </Card>
                     </TabsContent>

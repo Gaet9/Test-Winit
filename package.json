@@ -10,6 +10,7 @@
     "worker:va-gdcourts": "tsx scripts/va-gdcourts-scrape.playwright.ts",
     "worker:render-webhook": "tsx scripts/render-scrape-webhook.ts",
     "test:va-scrape": "tsx scripts/test-va-scrape-smoke.ts",
+    "test:va-scrape:headed": "cross-env PLAYWRIGHT_HEADED=1 tsx scripts/test-va-scrape-smoke.ts",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed"
   },
@@ -46,6 +47,7 @@
     "@types/papaparse": "^5.3.16",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "cross-env": "^10.1.0",
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
     "tailwindcss": "^4",

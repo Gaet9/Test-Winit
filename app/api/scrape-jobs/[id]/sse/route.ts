@@ -33,7 +33,7 @@ export async function GET(
           }
           send(job)
           if (TERMINAL.has(job.state)) break
-          await new Promise((r) => setTimeout(r, 1000))
+          await new Promise((r) => setTimeout(r, 800))
         }
       } catch (e) {
         send({

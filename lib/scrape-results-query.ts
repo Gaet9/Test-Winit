@@ -13,6 +13,14 @@ type RunRow = {
   results: unknown
 }
 
+export type WorkerScrapeRunLatest = {
+  id: string
+  name: string
+  processed_at: string
+  line_count: number | null
+  results: unknown
+}
+
 /** Flatten completed `worker_scrape_runs` into per-CSV-line rows for the Results table. */
 export async function fetchArchivedResultLines(
   supabase: SupabaseClient,
@@ -54,6 +62,32 @@ export async function fetchArchivedResultLines(
     })
   }
   return out
+}
+
+/** Newest archived run (full `results` JSON) for downloads / exports. */
+export async function fetchLatestWorkerScrapeRun(
+  supabase: SupabaseClient
+): Promise<WorkerScrapeRunLatest | null> {
+  const { data, error } = await supabase
+    .from("worker_scrape_runs")
+    .select("id,name,processed_at,line_count,results")
+    .order("processed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) {
+    console.error("[scrape-results]", error.message)
+    return null
+  }
+  if (!data) return null
+  const row = data as Record<string, unknown>
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    processed_at: row.processed_at as string,
+    line_count: (row.line_count as number) ?? null,
+    results: row.results,
+  }
 }
 
 export async function getLatestActiveJobId(

@@ -19,6 +19,7 @@ import asyncio
 import os
 import re
 import sys
+import threading
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -198,6 +199,98 @@ def persist_worker_scrape_run(name: str, line_count: int, results: list[dict[str
     wl(f"persist_worker_scrape_run inserted name={name!r} export_lines={line_count} case_blocks={len(results)}")
 
 
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _complete_worker_scrape_job_sync(sb: Any, job_id: str) -> None:
+    sb.table("worker_scrape_jobs").update(
+        {
+            "state": "scraping_complete",
+            "detail_message": "Scraping complete",
+            "progress_pct": 100,
+            "completed_at": iso_now(),
+            "updated_at": iso_now(),
+        }
+    ).eq("id", job_id).execute()
+
+
+def _fail_worker_scrape_job_sync(sb: Any, job_id: str, message: str) -> None:
+    sb.table("worker_scrape_jobs").update(
+        {
+            "state": "failed",
+            "detail_message": "Job failed",
+            "error_message": message[:4000],
+            "completed_at": iso_now(),
+            "updated_at": iso_now(),
+        }
+    ).eq("id", job_id).execute()
+
+
+def _patch_worker_scrape_job_line_sync(
+    sb: Any,
+    job_id: str,
+    line_idx_0: int,
+    line_no: int,
+    line_patch: dict[str, Any],
+    job_patch: dict[str, Any],
+) -> None:
+    r = sb.table("worker_scrape_jobs").select("lines_state").eq("id", job_id).single().execute()
+    raw = (r.data or {}).get("lines_state")
+    existing: list[Any] = list(raw) if isinstance(raw, list) else []
+    lines: list[dict[str, Any]] = []
+    for x in existing:
+        lines.append(dict(x) if isinstance(x, dict) else {})
+    while len(lines) <= line_idx_0:
+        k = len(lines)
+        lines.append(
+            {
+                "lineIndex": k + 1,
+                "state": "queued",
+                "message": "",
+                "progress_pct": 0,
+                "updated_at": iso_now(),
+            }
+        )
+    cur = lines[line_idx_0]
+    merged = {**cur, **line_patch, "updated_at": iso_now()}
+    merged.setdefault("lineIndex", line_no)
+    lines[line_idx_0] = merged
+    top: dict[str, Any] = {"lines_state": lines, "updated_at": iso_now(), **job_patch}
+    sb.table("worker_scrape_jobs").update(top).eq("id", job_id).execute()
+
+
+async def patch_worker_scrape_job_line(
+    sb: Any,
+    lock: asyncio.Lock,
+    job_id: str,
+    line_idx_0: int,
+    line_no: int,
+    line_patch: dict[str, Any],
+    job_patch: dict[str, Any],
+) -> None:
+    if sb is None or not job_id:
+        return
+
+    def _run() -> None:
+        _patch_worker_scrape_job_line_sync(sb, job_id, line_idx_0, line_no, line_patch, job_patch)
+
+    async with lock:
+        await asyncio.to_thread(_run)
+
+
+async def patch_worker_scrape_job_simple(sb: Any, lock: asyncio.Lock, job_id: str, patch: dict[str, Any]) -> None:
+    if sb is None or not job_id:
+        return
+
+    def _run() -> None:
+        row = {**patch, "updated_at": iso_now()}
+        sb.table("worker_scrape_jobs").update(row).eq("id", job_id).execute()
+
+    async with lock:
+        await asyncio.to_thread(_run)
+
+
 @app.get("/")
 def root() -> dict[str, Any]:
     """Render / uptime checks often hit `/`; avoid 404 noise."""
@@ -210,6 +303,10 @@ def health() -> dict[str, Any]:
 
 
 _bearer = HTTPBearer(auto_error=False)
+
+# Same-process duplicate POST /run (e.g. double Vercel invoke). Does not coordinate across multiple worker replicas.
+_job_flight = threading.Lock()
+_job_ids_running: set[str] = set()
 
 
 def require_webhook_secret(
@@ -249,9 +346,28 @@ async def run(
     n = len(req.rows) if req.rows else 0
     wl(f"POST /run queued job_id={req.job_id!r} inline_rows={n}")
 
+    jid = (req.job_id or "").strip()
+    if jid:
+        with _job_flight:
+            if jid in _job_ids_running:
+                wl(f"POST /run duplicate ignored job_id={jid!r} (already running)")
+                return RunJobResponse(
+                    queued=True,
+                    job_id=jid,
+                    message="Job already running (duplicate request ignored).",
+                )
+            _job_ids_running.add(jid)
+
+    async def _execute_with_cleanup() -> None:
+        try:
+            await execute_job(req.job_id, req.rows, req.name)
+        finally:
+            if jid:
+                with _job_flight:
+                    _job_ids_running.discard(jid)
+
     # BackgroundTasks runs in-process. On Render (long-running service) this is fine.
-    # For maximum reliability you can replace this with a real queue later.
-    bg.add_task(execute_job, req.job_id, req.rows, req.name)
+    bg.add_task(_execute_with_cleanup)
 
     return RunJobResponse(
         queued=True,
@@ -277,9 +393,16 @@ async def execute_job(
     cfg = get_config()
     archive_name = (run_name or "").strip() or (f"job-{job_id[:8]}" if job_id else "va-python-worker")
     wl(
-        f"execute_job start job_id={job_id!r} archive_name={archive_name!r} rows_param_is_none={rows is None} "
-        "(live job % on Vercel still needs the Node worker + worker_scrape_jobs updates; this worker writes worker_scrape_runs when Supabase is configured.)"
+        f"execute_job start job_id={job_id!r} archive_name={archive_name!r} rows_param_is_none={rows is None}"
     )
+
+    sb: Any = None
+    job_lock = asyncio.Lock()
+    if job_id and _SUPABASE_AVAILABLE:
+        try:
+            sb = get_supabase()
+        except Exception as e:
+            wl(f"execute_job: Supabase client unavailable (job progress + archive may be limited): {e!r}")
 
     # If rows were not provided, try to load them from Supabase.
     if rows is None:
@@ -307,6 +430,11 @@ async def execute_job(
             for r in data
         ]
         wl(f"execute_job loaded {len(rows)} row(s) from job_items")
+        if sb is None and _SUPABASE_AVAILABLE:
+            try:
+                sb = get_supabase()
+            except Exception as e:
+                wl(f"execute_job: could not init Supabase after job_items load: {e!r}")
 
     assert rows is not None
     if len(rows) == 0:
@@ -320,15 +448,35 @@ async def execute_job(
 
     wl(f"execute_job running {len(rows)} line(s) concurrency={cfg.concurrency} headless={cfg.headless}")
 
+    total_lines = len(rows)
+    if sb and job_id:
+        await patch_worker_scrape_job_simple(
+            sb,
+            job_lock,
+            job_id,
+            {
+                "state": "running",
+                "detail_message": f"Scraping {total_lines} line(s) on Python worker…",
+            },
+        )
+
     # Run bounded concurrency.
     sem = asyncio.Semaphore(cfg.concurrency)
 
-    async def run_one(row: VaSearchRow) -> dict[str, Any]:
+    async def run_one(row: VaSearchRow, line_idx_0: int) -> dict[str, Any]:
         label = f"{row.lastName}, {row.firstName} · {row.court}"
         wl(f"line START {label}")
         try:
             async with sem:
-                export_block = await scrape_one_row(row, job_id=job_id, headless=cfg.headless)
+                export_block = await scrape_one_row(
+                    row,
+                    job_id=job_id,
+                    headless=cfg.headless,
+                    job_lock=job_lock,
+                    line_idx_0=line_idx_0,
+                    total_lines=total_lines,
+                    sb=sb,
+                )
         except Exception as e:
             wl(f"line FAIL {label}: {type(e).__name__}: {e}")
             raise
@@ -336,7 +484,7 @@ async def execute_job(
         return export_block
 
     try:
-        exports = await asyncio.gather(*(run_one(r) for r in rows))
+        exports = await asyncio.gather(*(run_one(r, i) for i, r in enumerate(rows)))
         wl(f"execute_job scrape OK job_id={job_id!r} lines={len(rows)} export_blocks={len(exports)}")
         try:
             persist_worker_scrape_run(archive_name, len(exports), list(exports))
@@ -344,14 +492,34 @@ async def execute_job(
             wl(f"execute_job persist_worker_scrape_run FAILED: {pe!r}")
             traceback.print_exc()
             raise
+        if sb and job_id:
+            try:
+                await asyncio.to_thread(_complete_worker_scrape_job_sync, sb, job_id)
+            except Exception as ce:
+                wl(f"execute_job: worker_scrape_jobs complete update failed: {ce!r}")
         wl(f"execute_job finished OK job_id={job_id!r} lines={len(rows)}")
-    except Exception:
+    except Exception as e:
         wl("execute_job FAILED (full traceback on stderr, then re-raised for uvicorn)")
         traceback.print_exc()
+        if sb and job_id:
+            msg = f"{type(e).__name__}: {e}"
+            try:
+                await asyncio.to_thread(_fail_worker_scrape_job_sync, sb, job_id, msg)
+            except Exception as fe:
+                wl(f"execute_job: failed to write worker_scrape_jobs failure row: {fe!r}")
         raise
 
 
-async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool) -> dict[str, Any]:
+async def scrape_one_row(
+    row: VaSearchRow,
+    job_id: Optional[str],
+    headless: bool,
+    *,
+    job_lock: asyncio.Lock,
+    line_idx_0: int = 0,
+    total_lines: int = 1,
+    sb: Any = None,
+) -> dict[str, Any]:
     """
     One-row Playwright flow + case detail table export (aligned with TS va-gdcourts-scrape).
 
@@ -365,6 +533,29 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
         "searchedAt": datetime.now(timezone.utc).isoformat(),
         "cases": [],
     }
+
+    line_no = line_idx_0 + 1
+    tl = max(total_lines, 1)
+    base_overall = round((line_idx_0 / tl) * 100)
+    if job_id and sb is not None:
+        await patch_worker_scrape_job_line(
+            sb,
+            job_lock,
+            job_id,
+            line_idx_0,
+            line_no,
+            {
+                "lineIndex": line_no,
+                "state": "searching",
+                "message": f"Searching: {row.lastName}, {row.firstName} · {row.court}",
+                "progress_pct": base_overall,
+            },
+            {
+                "state": "searching",
+                "detail_message": f"Searching line {line_no} of {total_lines}",
+                "progress_pct": base_overall,
+            },
+        )
 
     async with async_playwright() as p:
         wl(f"scrape playwright START {label}")
@@ -450,6 +641,7 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
         initial_links = await list_case_link_locators(page)
         n_case = len(initial_links)
         wl(f"scrape results: {n_case} case link(s) {label}")
+        link_count = max(n_case, 1)
         for i in range(n_case):
             fresh = await list_case_link_locators(page)
             if i >= len(fresh):
@@ -457,6 +649,27 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
                 break
             link_loc = fresh[i]
             case_id_text = ((await link_loc.text_content()) or "").strip() or None
+            intra = (i + 1) / link_count
+            overall = min(99, round(((line_idx_0 + intra) / tl) * 100))
+            if job_id and sb is not None:
+                await patch_worker_scrape_job_line(
+                    sb,
+                    job_lock,
+                    job_id,
+                    line_idx_0,
+                    line_no,
+                    {
+                        "lineIndex": line_no,
+                        "state": "scraping",
+                        "message": f"Scraping line {line_no} (case {i + 1} of {n_case})",
+                        "progress_pct": overall,
+                    },
+                    {
+                        "state": "scraping",
+                        "detail_message": f"Scraping line {line_no} (case {i + 1})",
+                        "progress_pct": overall,
+                    },
+                )
             await link_loc.click()
             await page.wait_for_load_state("domcontentloaded")
             try:
@@ -483,5 +696,25 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
         await context.close()
         await browser.close()
         wl(f"scrape playwright END {label} exported_cases={len(item['cases'])}")
+    line_done_pct = round(((line_idx_0 + 1) / tl) * 100)
+    if job_id and sb is not None:
+        await patch_worker_scrape_job_line(
+            sb,
+            job_lock,
+            job_id,
+            line_idx_0,
+            line_no,
+            {
+                "lineIndex": line_no,
+                "state": "scraping_complete",
+                "message": f"Line {line_no} complete ({len(item['cases'])} case(s))",
+                "progress_pct": 100,
+            },
+            {
+                "state": "running",
+                "detail_message": f"Finished line {line_no} of {total_lines}",
+                "progress_pct": line_done_pct,
+            },
+        )
     return item
 

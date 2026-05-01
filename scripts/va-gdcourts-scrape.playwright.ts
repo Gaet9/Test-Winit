@@ -78,20 +78,29 @@ async function maybeAcceptDisclaimer(page: Page) {
   // Some environments show a disclaimer/accept gate. We handle it defensively:
   // - Try common "Accept" / "I Agree" buttons/links
   // - If not found, proceed without failing
+  const nameRe = /accept|i\s*agree|agree|continue|submit|i\s*accept|acknowledge|proceed/i
   const acceptCandidates = [
-    page.getByRole("button", { name: /accept|i\s*agree|agree/i }),
-    page.getByRole("link", { name: /accept|i\s*agree|agree/i }),
+    page.getByRole("button", { name: nameRe }),
+    page.getByRole("link", { name: nameRe }),
     page.locator('input[type="submit"][value*="Accept" i]'),
+    page.locator('input[type="submit"][value*="Agree" i]'),
+    page.locator('input[type="button"][value*="Accept" i]'),
     page.locator('button:has-text("Accept")'),
     page.locator('a:has-text("Accept")'),
+    page.locator("a:has-text(\"I Agree\")"),
+    page.locator("button:has-text(\"Continue\")"),
   ]
 
-  for (const loc of acceptCandidates) {
-    if (await loc.first().isVisible().catch(() => false)) {
-      await loc.first().click()
-      await page.waitForLoadState("domcontentloaded")
-      return
+  for (let round = 0; round < 3; round++) {
+    for (const loc of acceptCandidates) {
+      if (await loc.first().isVisible().catch(() => false)) {
+        await loc.first().click()
+        await page.waitForLoadState("domcontentloaded")
+        await page.waitForTimeout(600)
+        return
+      }
     }
+    await page.waitForTimeout(700)
   }
 }
 
@@ -99,7 +108,8 @@ async function selectCourt(page: Page, courtName: string) {
   // Autocomplete input provided by the site:
   // <input type="text" ... id="txtcourts1" class="ui-autocomplete-input" ...>
   const input = page.locator("#txtcourts1")
-  await input.waitFor({ state: "visible" })
+  const courtWaitMs = Number(process.env.VA_COURT_INPUT_TIMEOUT_MS ?? 90_000)
+  await input.waitFor({ state: "visible", timeout: courtWaitMs })
 
   await input.fill("")
   await input.type(courtName, { delay: 20 })
@@ -304,7 +314,9 @@ export async function runVaGdcourtsFlow(
       cases: [],
     }
 
-    await page.goto(LANDING_URL, { waitUntil: "domcontentloaded" })
+    await page.goto(LANDING_URL, { waitUntil: "domcontentloaded", timeout: 90_000 })
+    await page.waitForLoadState("domcontentloaded")
+    await maybeAcceptDisclaimer(page)
     await maybeAcceptDisclaimer(page)
     await selectCourt(page, row.court)
     await clickNameSearch(page, row.type)

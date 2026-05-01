@@ -20,9 +20,11 @@ From repo root:
 
 ```bash
 npm run test:va-scrape
-PLAYWRIGHT_HEADED=1 npm run test:va-scrape
+npm run test:va-scrape:headed
 npm run test:va-scrape -- ./path/to/sample.csv
 ```
+
+On **Windows**, use `npm run test:va-scrape:headed` (not `PLAYWRIGHT_HEADED=1 npm …`, which is Unix-only). Optional: `VA_COURT_INPUT_TIMEOUT_MS=120000` if `#txtcourts1` is slow to appear.
 
 Playwright Test (Chromium): `npm run test:e2e` (quick live URL smoke). For `#txtcourts1` + full `runVaGdcourtsFlow`, set `VA_E2E_LANDING=1` and `VA_E2E=1` respectively. Headed UI: `npm run test:e2e:headed`.
 
