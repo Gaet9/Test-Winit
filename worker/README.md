@@ -80,3 +80,28 @@ Start locally: `npm run worker:render-webhook` (set `PORT`, `WORKER_WEBHOOK_SECR
 Note: the Python worker updates **`worker_scrape_jobs`** for live SSE and writes **`worker_scrape_runs`** with **`scrape_job_id`** set to that job’s id. Each completed job keeps **one** archive row (full `results` array for every CSV line); retries replace the same row instead of stacking duplicates. Apply migration `20260430150000_worker_scrape_runs_link_job.sql` in Supabase before relying on `scrape_job_id`.
 
 **Logs look empty?** The worker logs `[va-worker] …` to stdout and stderr with flush. `PYTHONUNBUFFERED=1` is set in `worker/Dockerfile`. Scrape failures are logged and **re-raised** so uvicorn still prints `ERROR: Exception in ASGI application` with a traceback (same as before we swallowed errors). If you see `RuntimeError: … 0 rows`, the request had no `rows` and no `job_items` data for `job_id`.
+
+## How we filtered noise and repetitive data (without AI)
+
+The VA case detail pages contain many table cells and repeated UI elements. Exporting “every table cell” produces huge, repetitive JSON that is hard to read and expensive to store.
+
+Instead, we generate **clean, compact, deterministic exports** using simple DOM rules:
+
+- **Extract only label/value pairs**: we treat cells with `labelgrid…` classes as labels (e.g. “Case Number:”) and capture the adjacent value cell.
+- **Avoid accidental label-as-value**: the value cell is accepted unless it *looks like another label* (typically ends with `:`).
+- **Skip empty values**: we drop label entries that have no value, which removes lots of decorative or placeholder fields.
+- **Deduplicate repeated fields**: we remove duplicate `{label, value}` pairs (the site repeats some blocks).
+- **Merge into a single “Case detail” section**: rather than storing many tables with the same info, we store one compact section per case: `[{ title: "Case detail", fields: [...] }]`.
+
+This keeps the exported data **small, readable, and consistent**, and it ensures downstream logic (like dispute eligibility rules) has high-signal structured inputs.
+
+## Why we did not use AI for dispute eligibility
+
+We intentionally **did not use an AI model** to decide whether a case is eligible for dispute.
+
+- **Deterministic data**: the scraper exports a structured set of label/value fields (e.g. “Final Disposition”, “Fine/Costs Paid”, dates). This is a good fit for a rules-based classifier.
+- **Auditability**: eligibility decisions should be explainable and testable. A deterministic algorithm can always point to the exact rule and field that drove the outcome.
+- **Reliability & cost**: AI outputs can vary run-to-run, require extra latency, and add per-case cost. A rules engine is fast and consistent.
+- **Safety**: eligibility is “legal-ish”. We want conservative, predictable behavior with clear “missing info” fallbacks instead of a model hallucinating certainty.
+
+AI can still be useful _optionally_ **after** the deterministic decision (e.g., summarizing the case, drafting a user-facing explanation, or suggesting what documents to collect), but the actual classification should remain rules-driven for this workflow.

@@ -270,13 +270,33 @@ def _parse_date(s: Optional[str]) -> Optional[datetime]:
 
 
 def _pick_field(fields: list[dict[str, Any]], *label_keywords: str) -> Optional[str]:
-    want = {_norm_key(k) for k in label_keywords if k}
+    """
+    Best-effort label lookup with preference for "closest" matches.
+
+    We avoid overly generic keywords because the exported field list is long and
+    substring matching can accidentally bind to the wrong label.
+    """
+    wants = [_norm_key(k) for k in label_keywords if k]
+    wants = [w for w in wants if w]
+    if not wants:
+        return None
+
+    # 1) Exact label match (normalized)
+    for w in wants:
+        for f in fields:
+            lab = _norm_key(str(f.get("label") or ""))
+            if lab == w:
+                v = str(f.get("value") or "").strip()
+                return v or None
+
+    # 2) Substring match, prioritizing longer keywords
+    wants_sorted = sorted(wants, key=len, reverse=True)
     for f in fields:
         lab = _norm_key(str(f.get("label") or ""))
         if not lab:
             continue
-        for k in want:
-            if k and k in lab:
+        for w in wants_sorted:
+            if w and w in lab:
                 v = str(f.get("value") or "").strip()
                 return v or None
     return None
@@ -287,11 +307,11 @@ def analyze_dispute_eligibility_for_case(fields: list[dict[str, Any]], *, now: d
     status = _pick_field(fields, "Case Status", "Status") or "Unknown"
     plea = _pick_field(fields, "Plea") or "Unknown"
     disposition = _pick_field(fields, "Final Disposition", "Disposition", "Judgment", "Result") or "Unknown"
-    paid = _pick_field(fields, "Fine Paid", "Costs Paid", "Paid", "Payment") or "Unknown"
+    paid = _pick_field(fields, "Fine/Costs Paid", "Fine Paid", "Costs Paid", "Payment Status") or "Unknown"
     paid_date_raw = _pick_field(fields, "Fine/Costs Paid Date", "Paid Date", "Payment Date")
     appearance = _pick_field(fields, "Appearance", "Appeared", "Failure to Appear", "FTA") or "Unknown"
-    case_type = _pick_field(fields, "Case Type", "Charge Type", "Offense") or "Unknown"
-    jurisdiction = _pick_field(fields, "Jurisdiction", "Court") or "Unknown"
+    case_type = _pick_field(fields, "Case Type") or "Unknown"
+    jurisdiction = _pick_field(fields, "Jurisdiction") or "Unknown"
     hearing_date_raw = _pick_field(fields, "Hearing Date", "Court Date", "Trial Date", "Arraignment Date")
     judgment_date_raw = _pick_field(fields, "Disposition Date", "Judgment Date", "Finalized Date", "Sentenced Date")
 
@@ -334,77 +354,102 @@ def analyze_dispute_eligibility_for_case(fields: list[dict[str, Any]], *, now: d
     if hearing_dt:
         hearing_timing = "future" if now < hearing_dt else "past_or_today"
 
-    # Classification rules (ordered with overrides).
-    classification = "NOT DISPUTABLE"
-    confidence = "MEDIUM"
+    # Classification rules (stricter, with clear precedence).
+    classification = "CONDITIONALLY DISPUTABLE"
+    confidence = "LOW"
     reasoning: list[str] = []
 
-    # 1) Pending status => disputable
-    if "pending" in status_l or "open" in status_l or "active" in status_l:
-        classification = "DISPUTABLE"
-        confidence = "HIGH"
-        reasoning.append("Case status indicates it is still pending/open.")
+    def set_outcome(c: str, conf: str, *reasons: str) -> None:
+        nonlocal classification, confidence, reasoning
+        classification = c
+        confidence = conf
+        for r in reasons:
+            if r:
+                reasoning.append(r)
 
-    # 2) Before hearing => disputable
-    if hearing_dt and now < hearing_dt:
-        classification = "DISPUTABLE"
-        confidence = "HIGH"
-        reasoning.append("Hearing date is in the future, so the case can still be contested.")
-
-    # 3) No plea + no disposition => disputable
-    if classification != "DISPUTABLE":
-        if ("unknown" in plea_l or "none" in plea_l or plea_l.strip() == "") and (
-            "unknown" in disp_l or disp_l.strip() == ""
-        ):
-            classification = "DISPUTABLE"
-            confidence = "MEDIUM"
-            reasoning.append("No recorded plea and no final disposition found.")
-
-    # 4) Disposition dismissed => not disputable
-    if "dismiss" in disp_l or "nolle" in disp_l or "prosequi" in disp_l:
-        classification = "NOT DISPUTABLE"
-        confidence = "HIGH"
-        reasoning.append("Final disposition indicates the matter was dismissed (nothing to dispute).")
-
-    # 5) Guilty => likely not, unless appeal window / exceptional relief
-    guilty_signal = "guilty" in plea_l or ("guilty" in disp_l and "not guilty" not in disp_l)
-    paid_signal = any(x in paid_l for x in ("yes", "paid", "true"))
+    # Signals
+    paid_signal = any(x in paid_l for x in ("paid", "yes", "true", "prepaid"))
+    guilty_signal = ("guilty" in plea_l) or ("guilty" in disp_l and "not guilty" not in disp_l)
+    not_guilty_signal = "not guilty" in disp_l or "not guilty" in plea_l
+    dismissed_signal = ("dismiss" in disp_l) or ("nolle" in disp_l) or ("prosequi" in disp_l)
+    prepaid_signal = "prepaid" in disp_l
+    certified_signal = "certified" in disp_l and "grand jury" in disp_l
+    in_absentia_signal = "absentia" in disp_l
     missed_signal = (
-        "miss" in appearance_l
-        or "fta" in appearance_l
-        or "failure" in appearance_l
-        or "absentia" in disp_l  # e.g. "Guilty In Absentia"
+        "miss" in appearance_l or "fta" in appearance_l or "failure" in appearance_l or in_absentia_signal
     )
 
-    if guilty_signal and classification != "DISPUTABLE":
+    # 0) Outcomes with nothing to fight
+    if dismissed_signal or not_guilty_signal:
+        set_outcome(
+            "NOT DISPUTABLE",
+            "HIGH",
+            "Final disposition indicates the matter was dismissed / not guilty (nothing to dispute).",
+        )
+    elif prepaid_signal:
+        set_outcome(
+            "NOT DISPUTABLE",
+            "HIGH",
+            "Disposition indicates the ticket was prepaid/accepted.",
+        )
+
+    # 1) Pending / before hearing => disputable (only if not already resolved)
+    if classification != "NOT DISPUTABLE":
+        if ("pending" in status_l) or ("open" in status_l) or ("active" in status_l):
+            set_outcome("DISPUTABLE", "HIGH", "Case appears pending/open.")
+        if hearing_dt and now < hearing_dt:
+            set_outcome("DISPUTABLE", "HIGH", "Hearing date is in the future, so the case can still be contested.")
+
+    # 2) Certified to grand jury / moved forum => conditionally disputable (needs different court record)
+    if classification != "NOT DISPUTABLE" and certified_signal:
+        set_outcome(
+            "CONDITIONALLY DISPUTABLE",
+            "MEDIUM",
+            "Case indicates it was certified to a different court (need the final circuit/court record).",
+        )
+
+    # 3) Guilty handling (stricter)
+    if classification not in ("DISPUTABLE", "NOT DISPUTABLE") and guilty_signal:
         reasoning.append("Guilty plea/disposition is a strong signal the case is finalized.")
         if within_appeal:
-            classification = "CONDITIONALLY DISPUTABLE"
-            confidence = "MEDIUM"
-            reasoning.append(f"Judgment appears within ~{appeal_deadline_days}-day appeal window.")
+            set_outcome(
+                "CONDITIONALLY DISPUTABLE",
+                "MEDIUM",
+                f"Judgment appears within ~{appeal_deadline_days}-day appeal window.",
+            )
+        elif paid_signal:
+            set_outcome(
+                "NOT DISPUTABLE",
+                "HIGH",
+                "Fine/costs appear paid, which strongly indicates acceptance/closure.",
+                f"Judgment appears outside ~{appeal_deadline_days}-day appeal window.",
+            )
         else:
-            classification = "NOT DISPUTABLE"
-            confidence = "HIGH" if paid_signal else "MEDIUM"
-            if judgment_dt:
-                reasoning.append(f"Judgment appears outside ~{appeal_deadline_days}-day appeal window.")
+            set_outcome(
+                "NOT DISPUTABLE",
+                "MEDIUM",
+                f"Judgment appears outside ~{appeal_deadline_days}-day appeal window.",
+            )
 
-    # 6) Paid + guilty => not disputable
-    if paid_signal and guilty_signal:
-        classification = "NOT DISPUTABLE"
-        confidence = "HIGH"
-        reasoning.append("Fine/costs appear paid, which strongly indicates acceptance/closure.")
+    # 4) Missed appearance only matters when it could realistically reopen (and isn't already closed/paid)
+    if classification != "NOT DISPUTABLE" and missed_signal:
+        if not paid_signal:
+            set_outcome(
+                "CONDITIONALLY DISPUTABLE",
+                "MEDIUM",
+                "Missed appearance/FTA may allow reopening under specific procedures.",
+            )
+        else:
+            # Paid + in absentia generally indicates closure; don't keep it conditional.
+            reasoning.append("In-absentia/missed-appearance signal present, but payment suggests closure.")
 
-    # 7) Missed appearance => conditionally disputable
-    if missed_signal and classification != "DISPUTABLE":
-        classification = "CONDITIONALLY DISPUTABLE"
-        confidence = "MEDIUM"
-        reasoning.append("Missed appearance/FTA may allow reopening under specific procedures.")
-
-    # 8) Missing critical info => conditional override (low confidence)
-    if missing_critical and classification != "DISPUTABLE":
-        classification = "CONDITIONALLY DISPUTABLE"
-        confidence = "LOW"
-        reasoning.append("Missing critical information; eligibility may depend on additional facts/documents.")
+    # 5) Missing info fallback: only if we haven't reached a high-confidence outcome
+    if missing_critical and confidence != "HIGH" and classification != "DISPUTABLE":
+        set_outcome(
+            "CONDITIONALLY DISPUTABLE",
+            "LOW",
+            "Missing critical information; eligibility may depend on additional facts/documents.",
+        )
 
     recommended_action = "Review case details and deadlines."
     if classification == "DISPUTABLE":

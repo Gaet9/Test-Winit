@@ -127,7 +127,10 @@ export function ResultLineDetailSheet(props: {
 
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent side='right' className='w-full sm:max-w-[min(96vw,72rem)] sm:w-[min(96vw,72rem)] overflow-y-auto'>
+            <SheetContent
+                side='right'
+                className='w-full sm:min-w-3xl sm:max-w-[min(96vw,72rem)] sm:w-[min(96vw,72rem)] overflow-y-auto'
+            >
                 {row ?
                     <>
                         <SheetHeader className='text-left'>

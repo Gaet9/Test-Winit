@@ -89,6 +89,8 @@ function ResultsSection({
     emptyHint,
     onRowClick,
     archiveRuns,
+    hasMore,
+    onEndReached,
 }: {
     title: string;
     description: string;
@@ -96,7 +98,24 @@ function ResultsSection({
     emptyHint: string;
     onRowClick: (r: ScrapeResultLineRow) => void;
     archiveRuns: WorkerScrapeRunArchive[];
+    hasMore: boolean;
+    onEndReached: () => void;
 }) {
+    const sentinelRef = React.useRef<HTMLDivElement | null>(null);
+    React.useEffect(() => {
+        if (!hasMore) return;
+        const el = sentinelRef.current;
+        if (!el) return;
+        const obs = new IntersectionObserver(
+            (entries) => {
+                if (entries.some((e) => e.isIntersecting)) onEndReached();
+            },
+            { rootMargin: "600px 0px" },
+        );
+        obs.observe(el);
+        return () => obs.disconnect();
+    }, [hasMore, onEndReached]);
+
     return (
         <section className='space-y-2'>
             <div>
@@ -165,6 +184,7 @@ function ResultsSection({
                     </TableBody>
                 </Table>
             </div>
+            {hasMore ? <div ref={sentinelRef} className='h-8' /> : null}
         </section>
     );
 }
@@ -178,6 +198,10 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
     const [liveJob, setLiveJob] = React.useState<WorkerScrapeJobRow | null>(null);
     const [jobIdOverride, setJobIdOverride] = React.useState("");
     const [sseStatus, setSseStatus] = React.useState<"idle" | "open" | "closed">("idle");
+    const [nextCursor, setNextCursor] = React.useState<string | null>(null);
+    const [loadingMore, setLoadingMore] = React.useState(false);
+    const [visibleCurrent, setVisibleCurrent] = React.useState(20);
+    const [visiblePassed, setVisiblePassed] = React.useState(20);
 
     React.useEffect(() => {
         const id = focusJobId?.trim();
@@ -187,27 +211,43 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
         });
     }, [focusJobId]);
 
-    const load = React.useCallback(async () => {
-        const res = await fetch("/api/scrape-results", { cache: "no-store" });
+    const loadPage = React.useCallback(async (cursor: string | null) => {
+        const qs = new URLSearchParams();
+        qs.set("limit", "20");
+        if (cursor) qs.set("cursor", cursor);
+        const res = await fetch(`/api/scrape-results?${qs.toString()}`, { cache: "no-store" });
         const body = (await res.json()) as {
             archive: ScrapeResultLineRow[];
             archiveRuns?: WorkerScrapeRunArchive[];
+            nextCursor?: string | null;
             activeJob: WorkerScrapeJobRow | null;
             latestRun?: WorkerScrapeRunLatest | null;
             configured?: boolean;
         };
+        setNextCursor(body.nextCursor ?? null);
         setConfigured(body.configured !== false);
-        setArchive(body.archive ?? []);
-        setArchiveRuns(body.archiveRuns ?? []);
+        if (cursor) {
+            setArchive((prev) => [...prev, ...(body.archive ?? [])]);
+            setArchiveRuns((prev) => [...prev, ...(body.archiveRuns ?? [])]);
+        } else {
+            setArchive(body.archive ?? []);
+            setArchiveRuns(body.archiveRuns ?? []);
+        }
         setLiveJob(body.activeJob ?? null);
         setLatestRun(body.latestRun ?? null);
     }, []);
 
+    const loadInitial = React.useCallback(async () => {
+        setVisibleCurrent(20);
+        setVisiblePassed(20);
+        await loadPage(null);
+    }, [loadPage]);
+
     React.useEffect(() => {
         queueMicrotask(() => {
-            void load();
+            void loadInitial();
         });
-    }, [load]);
+    }, [loadInitial]);
 
     const watchJobId = jobIdOverride.trim() || liveJob?.id || null;
 
@@ -239,7 +279,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
                 if (raw.state === "scraping_complete" || raw.state === "failed") {
                     es.close();
                     setSseStatus("closed");
-                    void load();
+                    void loadInitial();
                 }
             } catch {
                 /* ignore malformed chunks */
@@ -255,7 +295,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
             es.close();
             setSseStatus("closed");
         };
-    }, [watchJobId, configured, load]);
+    }, [watchJobId, configured, loadInitial]);
 
     const liveRows = React.useMemo(() => (liveJob ? jobLinesToResultRows(liveJob) : []), [liveJob]);
     const displayRows = React.useMemo(() => [...liveRows, ...archive], [liveRows, archive]);
@@ -275,6 +315,32 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
         () => partitionResultsByRecency(displayRows, partitionNow),
         [displayRows, partitionNow],
     );
+
+    const shownCurrent = React.useMemo(() => currentRows.slice(0, visibleCurrent), [currentRows, visibleCurrent]);
+    const shownPassed = React.useMemo(() => passedRows.slice(0, visiblePassed), [passedRows, visiblePassed]);
+
+    const hasMoreCurrent = shownCurrent.length < currentRows.length || (!!nextCursor && !loadingMore);
+    const hasMorePassed = shownPassed.length < passedRows.length || (!!nextCursor && !loadingMore);
+
+    const maybeFetchMore = React.useCallback(async () => {
+        if (!nextCursor || loadingMore) return;
+        setLoadingMore(true);
+        try {
+            await loadPage(nextCursor);
+        } finally {
+            setLoadingMore(false);
+        }
+    }, [nextCursor, loadingMore, loadPage]);
+
+    const onEndReachedCurrent = React.useCallback(() => {
+        setVisibleCurrent((n) => n + 20);
+        if (visibleCurrent >= currentRows.length) void maybeFetchMore();
+    }, [visibleCurrent, currentRows.length, maybeFetchMore]);
+
+    const onEndReachedPassed = React.useCallback(() => {
+        setVisiblePassed((n) => n + 20);
+        if (visiblePassed >= passedRows.length) void maybeFetchMore();
+    }, [visiblePassed, passedRows.length, maybeFetchMore]);
 
     const rowToExportFields = React.useCallback(
         (r: ScrapeResultLineRow) => ({
@@ -333,7 +399,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
                     <p className='text-xs text-muted-foreground'>Live updates (SSE): {sseStatus}</p>
                 </div>
                 <div className='flex flex-wrap gap-2'>
-                    <Button type='button' variant='outline' onClick={() => void load()}>
+                    <Button type='button' variant='outline' onClick={() => void loadInitial()}>
                         Refresh results
                     </Button>
                     <Button type='button' variant='outline' disabled={!displayRows.length} onClick={exportCsv}>
@@ -370,18 +436,22 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
                 <ResultsSection
                     title='Current export'
                     description='Live job lines plus archive rows from runs finished in the last 15 minutes (by processed time).'
-                    rows={currentRows}
+                    rows={shownCurrent}
                     emptyHint='No current activity. Start a scrape or wait for an archive row in the window below after a run completes.'
                     onRowClick={setDetailRow}
                     archiveRuns={archiveRuns}
+                    hasMore={hasMoreCurrent}
+                    onEndReached={onEndReachedCurrent}
                 />
                 <ResultsSection
                     title='Previously exported'
                     description='Older archived lines. Click a row for the same full detail sheet.'
-                    rows={passedRows}
+                    rows={shownPassed}
                     emptyHint='No older exports in view.'
                     onRowClick={setDetailRow}
                     archiveRuns={archiveRuns}
+                    hasMore={hasMorePassed}
+                    onEndReached={onEndReachedPassed}
                 />
             </div>
 

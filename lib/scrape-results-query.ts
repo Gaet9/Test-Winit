@@ -6,6 +6,11 @@ import type {
   WorkerScrapeJobRow,
 } from "@/types/scrape-result-line"
 
+export type ScrapeResultsCursor = {
+  processed_at: string
+  id: string
+}
+
 type RunRow = {
   id: string
   name: string
@@ -37,20 +42,41 @@ export type WorkerScrapeRunLatest = {
 /** One query: flattened table rows plus full runs for line-detail modals. */
 export async function fetchScrapeArchiveBundle(
   supabase: SupabaseClient,
-  runLimit = 50
-): Promise<{ lines: ScrapeResultLineRow[]; runs: WorkerScrapeRunArchive[] }> {
-  const { data, error } = await supabase
+  options?: { runLimit?: number; cursor?: ScrapeResultsCursor | null }
+): Promise<{ lines: ScrapeResultLineRow[]; runs: WorkerScrapeRunArchive[]; nextCursor: ScrapeResultsCursor | null }> {
+  const runLimit = Math.max(1, Math.min(200, options?.runLimit ?? 20))
+  const cursor = options?.cursor ?? null
+
+  let q = supabase
     .from("worker_scrape_runs")
     .select("id,name,processed_at,results,scrape_job_id,dispute_analysis")
     .order("processed_at", { ascending: false })
-    .limit(runLimit)
+    .order("id", { ascending: false })
+    .limit(runLimit + 1)
+
+  if (cursor) {
+    // Keyset pagination:
+    // (processed_at < cursor.processed_at) OR (processed_at = cursor.processed_at AND id < cursor.id)
+    q = q.or(
+      `processed_at.lt.${cursor.processed_at},and(processed_at.eq.${cursor.processed_at},id.lt.${cursor.id})`
+    )
+  }
+
+  const { data, error } = await q
 
   if (error) {
     console.error("[scrape-results]", error.message)
-    return { lines: [], runs: [] }
+    return { lines: [], runs: [], nextCursor: null }
   }
 
-  const runs: WorkerScrapeRunArchive[] = ((data ?? []) as RunRow[]).map((run) => ({
+  const raw = (data ?? []) as RunRow[]
+  const page = raw.slice(0, runLimit)
+  const more = raw.length > runLimit
+  const nextCursor = more
+    ? { processed_at: page[page.length - 1]!.processed_at, id: page[page.length - 1]!.id }
+    : null
+
+  const runs: WorkerScrapeRunArchive[] = page.map((run) => ({
     id: run.id,
     name: run.name,
     processed_at: run.processed_at,
@@ -83,7 +109,7 @@ export async function fetchScrapeArchiveBundle(
       })
     })
   }
-  return { lines, runs }
+  return { lines, runs, nextCursor }
 }
 
 /** Flatten completed `worker_scrape_runs` into per-CSV-line rows for the Results table. */
@@ -91,7 +117,7 @@ export async function fetchArchivedResultLines(
   supabase: SupabaseClient,
   runLimit = 50
 ): Promise<ScrapeResultLineRow[]> {
-  const { lines } = await fetchScrapeArchiveBundle(supabase, runLimit)
+  const { lines } = await fetchScrapeArchiveBundle(supabase, { runLimit })
   return lines
 }
 
