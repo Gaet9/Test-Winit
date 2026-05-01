@@ -52,6 +52,14 @@ function badgeVariant(state: string): "default" | "secondary" | "destructive" | 
     return "outline";
 }
 
+function disputeVariant(classification: string | null | undefined): "default" | "secondary" | "destructive" | "outline" {
+    const c = (classification ?? "").toLowerCase();
+    if (c === "disputable") return "default";
+    if (c === "conditionally disputable") return "secondary";
+    if (c === "not disputable") return "destructive";
+    return "outline";
+}
+
 function shortStateLabel(state: string): string {
     const s = (state ?? "").toLowerCase().trim();
     if (!s) return "—";
@@ -79,6 +87,71 @@ function formatShortDateTime(isoLike: string): string {
     } catch {
         return d.toLocaleString();
     }
+}
+
+type DisputeClassification = "DISPUTABLE" | "CONDITIONALLY DISPUTABLE" | "NOT DISPUTABLE";
+
+function resolveLineDisputeSummary(
+    r: ScrapeResultLineRow,
+    archiveRuns: WorkerScrapeRunArchive[],
+): { classification: DisputeClassification; recommended_action: string } | null {
+    if (r.source !== "archive") return null;
+    const run = archiveRuns.find((x) => x.id === r.runId);
+    if (!run) return null;
+    const arr = run.dispute_analysis as unknown;
+    if (!Array.isArray(arr)) return null;
+    const line = arr[r.lineIndex - 1] as Record<string, unknown> | undefined;
+    const cases = (line && (line.cases as unknown)) as unknown[] | undefined;
+    if (!Array.isArray(cases) || cases.length === 0) return null;
+
+    const analyses = cases
+        .map((c) => (c as Record<string, unknown>)?.analysis as Record<string, unknown> | undefined)
+        .filter(Boolean);
+    if (!analyses.length) return null;
+
+    const hasDisputable = analyses.some((a) => (a?.classification as string | undefined) === "DISPUTABLE");
+    if (hasDisputable) {
+        const a = analyses.find((x) => (x?.classification as string | undefined) === "DISPUTABLE")!;
+        return {
+            classification: "DISPUTABLE",
+            recommended_action: (a.recommended_action as string | undefined) ?? "",
+        };
+    }
+
+    const hasConditional = analyses.some(
+        (a) => (a?.classification as string | undefined) === "CONDITIONALLY DISPUTABLE",
+    );
+    const allNot =
+        analyses.length > 0 &&
+        analyses.every((a) => (a?.classification as string | undefined) === "NOT DISPUTABLE");
+
+    // Per your rule:
+    // - NOT DISPUTABLE if all cases are NOT DISPUTABLE
+    // - CONDITIONALLY DISPUTABLE if at least one conditional and all others are NOT DISPUTABLE
+    // - DISPUTABLE if at least one disputable (handled above)
+    if (allNot) {
+        const a = analyses.find((x) => (x?.classification as string | undefined) === "NOT DISPUTABLE")!;
+        return {
+            classification: "NOT DISPUTABLE",
+            recommended_action: (a.recommended_action as string | undefined) ?? "",
+        };
+    }
+
+    if (hasConditional) {
+        const othersOk = analyses.every((a) => {
+            const c = (a?.classification as string | undefined) ?? "";
+            return c === "CONDITIONALLY DISPUTABLE" || c === "NOT DISPUTABLE";
+        });
+        if (othersOk) {
+            const a = analyses.find((x) => (x?.classification as string | undefined) === "CONDITIONALLY DISPUTABLE")!;
+            return {
+                classification: "CONDITIONALLY DISPUTABLE",
+                recommended_action: (a.recommended_action as string | undefined) ?? "",
+            };
+        }
+    }
+
+    return null;
 }
 
 function resolveArchiveLineExportItem(r: ScrapeResultLineRow, archiveRuns: WorkerScrapeRunArchive[]): Record<string, unknown> | null {
@@ -166,7 +239,7 @@ function ResultsSection({
         return `${n.slice(0, 10)}…${n.slice(-7)}`;
     }, []);
 
-    type SortKey = "source" | "run" | "label" | "state" | "progress" | "detail" | "updated" | "cases";
+    type SortKey = "source" | "run" | "label" | "dispute" | "state" | "progress" | "detail" | "updated" | "cases";
     const [sortKey, setSortKey] = React.useState<SortKey>("updated");
     const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
 
@@ -199,6 +272,10 @@ function ResultsSection({
                     return new Date(r.updatedAt).getTime() || 0;
                 case "detail":
                     return r.message ?? "";
+                case "dispute": {
+                    const s = resolveLineDisputeSummary(r, archiveRuns);
+                    return s?.classification ?? "";
+                }
                 case "cases":
                     return resolveArchiveLineCaseCount(r, archiveRuns) ?? -1;
                 default:
@@ -252,6 +329,9 @@ function ResultsSection({
                             <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("label")}>
                                 Label
                             </TableHead>
+                            <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("dispute")}>
+                                Dispute
+                            </TableHead>
                             <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("state")}>
                                 State
                             </TableHead>
@@ -292,6 +372,22 @@ function ResultsSection({
                                 </TableCell>
                                 <TableCell title={r.lineLabel} className='max-w-[220px] sm:max-w-[320px]'>
                                     <span className='block wrap-break-word line-clamp-2'>{r.lineLabel}</span>
+                                </TableCell>
+                                <TableCell className='max-w-[220px]'>
+                                    {(() => {
+                                        const s = resolveLineDisputeSummary(r, archiveRuns);
+                                        if (!s) return <span className='text-muted-foreground'>—</span>;
+                                        return (
+                                            <div className='space-y-1'>
+                                                <Badge variant={disputeVariant(s.classification)}>{s.classification}</Badge>
+                                                {s.recommended_action ?
+                                                    <p title={s.recommended_action} className='text-xs text-muted-foreground line-clamp-1'>
+                                                        {s.recommended_action}
+                                                    </p>
+                                                :   null}
+                                            </div>
+                                        );
+                                    })()}
                                 </TableCell>
                                 <TableCell>
                                     <Badge variant={badgeVariant(r.state)}>{shortStateLabel(r.state)}</Badge>
@@ -481,6 +577,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
 
     const rowToExportFields = React.useCallback(
         (r: ScrapeResultLineRow) => {
+            const dispute = resolveLineDisputeSummary(r, archiveRuns);
             const issue = resolveLineIssueKind(r);
             const caseCount = resolveArchiveLineCaseCount(r, archiveRuns);
             return {
@@ -489,6 +586,8 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
             runName: r.runName,
             lineIndex: r.lineIndex,
             lineLabel: r.lineLabel,
+            disputeClassification: dispute?.classification ?? "",
+            disputeRecommendedAction: dispute?.recommended_action ?? "",
             caseCount: caseCount ?? "",
             issueKind: issue ?? "",
             state: r.state,
