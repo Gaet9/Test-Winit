@@ -64,3 +64,5 @@ Start locally: `npm run worker:render-webhook` (set `PORT`, `WORKER_WEBHOOK_SECR
     - optional: `WORKER_CONCURRENCY`, `WORKER_HEADLESS`
 
 Note: the Python `/run` path does not yet write to the same **`worker_scrape_jobs`** rows as the TypeScript scraper; use **Option A** for identical progress in the Results tab.
+
+**Logs look empty?** Ensure the image sets `PYTHONUNBUFFERED=1` (see `worker/Dockerfile`). If you see `execute_job abort: 0 rows`, Vercel must send a `rows` array in the JSON body, or you must load rows from a real `job_items` table — otherwise `asyncio.gather()` runs zero tasks and nothing happens.

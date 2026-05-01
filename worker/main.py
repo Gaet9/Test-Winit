@@ -41,6 +41,11 @@ load_dotenv()
 
 app = FastAPI(title="VA Courts Scraper Worker", version="0.1.0")
 
+
+def wl(msg: str) -> None:
+    """Line-buffered worker log (Render shows stdout)."""
+    print(f"[va-worker] {msg}", flush=True)
+
 SearchType = Literal["civil", "traffic/criminal"]
 
 
@@ -153,6 +158,9 @@ async def run(
             detail="Provide either job_id (preferred) or rows (demo mode).",
         )
 
+    n = len(req.rows) if req.rows else 0
+    wl(f"POST /run queued job_id={req.job_id!r} inline_rows={n}")
+
     # BackgroundTasks runs in-process. On Render (long-running service) this is fine.
     # For maximum reliability you can replace this with a real queue later.
     bg.add_task(execute_job, req.job_id, req.rows)
@@ -175,12 +183,18 @@ async def execute_job(job_id: Optional[str], rows: Optional[list[VaSearchRow]]):
     """
 
     cfg = get_config()
+    wl(
+        f"execute_job start job_id={job_id!r} rows_param_is_none={rows is None} "
+        "(Python worker does not update worker_scrape_jobs; Vercel UI progress needs the Node Dockerfile.scrape worker.)"
+    )
 
     # If rows were not provided, try to load them from Supabase.
     if rows is None:
         if job_id is None:
-            raise RuntimeError("rows not provided and job_id is missing")
+            wl("execute_job abort: no rows and no job_id")
+            return
 
+        wl("execute_job loading rows from Supabase table job_items …")
         sb = get_supabase()
         # Placeholder schema assumption:
         # - table: job_items
@@ -198,18 +212,34 @@ async def execute_job(job_id: Optional[str], rows: Optional[list[VaSearchRow]]):
             )
             for r in data
         ]
+        wl(f"execute_job loaded {len(rows)} row(s) from job_items")
+
+    assert rows is not None
+    if len(rows) == 0:
+        wl(
+            "execute_job abort: 0 rows to scrape. "
+            "If Vercel forwards the CSV, ensure the JSON body includes `rows`. "
+            "If you only send job_id, create a `job_items` table and rows or use the Node Dockerfile.scrape worker."
+        )
+        return
+
+    wl(f"execute_job running {len(rows)} line(s) concurrency={cfg.concurrency} headless={cfg.headless}")
 
     # Run bounded concurrency.
     sem = asyncio.Semaphore(cfg.concurrency)
 
     async def run_one(row: VaSearchRow):
+        label = f"{row.lastName}, {row.firstName} · {row.court}"
+        wl(f"line START {label}")
         async with sem:
             await scrape_one_row(row, job_id=job_id, headless=cfg.headless)
+        wl(f"line OK   {label}")
 
     try:
         await asyncio.gather(*(run_one(r) for r in rows))
+        wl(f"execute_job finished OK job_id={job_id!r} lines={len(rows)}")
     except Exception:
-        # Log without re-raising: Starlette background tasks otherwise surface as ASGI errors after 200 OK.
+        wl("execute_job FAILED (traceback follows)")
         traceback.print_exc()
 
 
@@ -222,13 +252,16 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
     """
 
     landing_url = "https://eapps.courts.state.va.us/gdcourts/landing.do"
+    label = f"{row.lastName}, {row.firstName} · {row.court} ({row.type})"
 
     async with async_playwright() as p:
+        wl(f"scrape playwright START {label}")
         browser = await p.chromium.launch(headless=headless)
         context = await browser.new_context()
         page = await context.new_page()
 
         await page.goto(landing_url, wait_until="domcontentloaded")
+        wl(f"scrape landed {label}")
 
         # Optional "accept" step (best-effort).
         for sel in [
@@ -262,7 +295,7 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
             await page.keyboard.press("Enter")
 
         # jQuery UI leaves the court autocomplete <ul> open; it intercepts clicks on sidebar links.
-        await court_input.blur()
+        await court_input.evaluate("e => e.blur()")
         await page.keyboard.press("Escape")
         overlay = page.locator("ul.ui-autocomplete.ui-menu:visible, ul.ui-menu.ui-widget:visible").first
         if await safe_is_visible(overlay):
@@ -282,8 +315,10 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
         try:
             await link.click(timeout=15_000)
         except Exception:
+            wl(f"scrape name-search click retry force=True {label}")
             await link.click(force=True, timeout=15_000)
         await page.wait_for_load_state("domcontentloaded")
+        wl(f"scrape name-search page loaded {label}")
 
         # Fill search fields + submit.
         await page.locator("#localnamesearchlastname").wait_for(state="visible")
@@ -302,4 +337,5 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
 
         await context.close()
         await browser.close()
+        wl(f"scrape playwright END {label}")
 

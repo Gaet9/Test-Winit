@@ -18,6 +18,7 @@ RUN python -m playwright install --with-deps chromium
 COPY . .
 
 ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
 # Render sets PORT at runtime (often 10000). We bind to whatever PORT is.
 EXPOSE 8000
 
