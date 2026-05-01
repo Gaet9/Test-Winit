@@ -198,6 +198,12 @@ def persist_worker_scrape_run(name: str, line_count: int, results: list[dict[str
     wl(f"persist_worker_scrape_run inserted name={name!r} export_lines={line_count} case_blocks={len(results)}")
 
 
+@app.get("/")
+def root() -> dict[str, Any]:
+    """Render / uptime checks often hit `/`; avoid 404 noise."""
+    return {"ok": True, "service": "va-worker", "health": "/health", "run": "POST /run"}
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "supabase": _SUPABASE_AVAILABLE}
@@ -435,7 +441,7 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
         try:
             title = await page.title()
             wl(
-                f"scrape post-search url={page.url()[:200]!r} title={title[:80]!r}… "
+                f"scrape post-search url={page.url[:200]!r} title={title[:80]!r}… "
                 f"(if stuck next, check captcha / zero results / wrong court) {label}"
             )
         except Exception as e:
@@ -463,7 +469,7 @@ async def scrape_one_row(row: VaSearchRow, job_id: Optional[str], headless: bool
                 {
                     "caseIndex": i,
                     "caseIdText": case_id_text,
-                    "url": page.url(),
+                    "url": page.url,
                     "exportedAt": datetime.now(timezone.utc).isoformat(),
                     "tables": tables,
                 }

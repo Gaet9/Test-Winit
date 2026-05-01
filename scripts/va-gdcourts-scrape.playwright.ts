@@ -224,12 +224,21 @@ export type VaFlowProgressCtx = {
   totalLines: number
 }
 
+function playwrightHeadless(): boolean {
+  const headed =
+    process.env.PLAYWRIGHT_HEADED === "1" ||
+    process.env.VA_SCRAPE_HEADED === "1" ||
+    process.env.HEADED === "1"
+  return !headed
+}
+
 export async function runVaGdcourtsFlow(
   rows: VaSearchRow[],
   progress?: VaFlowProgressCtx
 ): Promise<CaseExport[]> {
   const browser = await chromium.launch({
-    headless: true,
+    headless: playwrightHeadless(),
+    slowMo: playwrightHeadless() ? 0 : 150,
   })
 
   const context = await browser.newContext()

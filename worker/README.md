@@ -14,6 +14,18 @@ The worker is responsible for:
 - bounded concurrency + retries/backoff (to be added)
 - writing progress + results to Supabase (recommended)
 
+## Headless / headed scrape tests (same flow as production TS worker)
+
+From repo root:
+
+```bash
+npm run test:va-scrape
+PLAYWRIGHT_HEADED=1 npm run test:va-scrape
+npm run test:va-scrape -- ./path/to/sample.csv
+```
+
+Playwright Test (Chromium): `npm run test:e2e` (quick live URL smoke). For `#txtcourts1` + full `runVaGdcourtsFlow`, set `VA_E2E_LANDING=1` and `VA_E2E=1` respectively. Headed UI: `npm run test:e2e:headed`.
+
 ## Local run (no Docker)
 
 ```bash
