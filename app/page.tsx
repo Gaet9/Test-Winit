@@ -102,7 +102,7 @@ export default function Home() {
     return (
         <div className='min-h-full flex flex-col bg-background'>
             <header className='border-b'>
-                <div className='mx-auto w-full max-w-6xl px-4 py-4'>
+                <div className='mx-auto w-full max-w-7xl px-4 py-4'>
                     <div className='min-w-0'>
                         <div className='flex items-center gap-2'>
                             <h1 className='truncate text-lg font-semibold'>Parking Summons Monitor</h1>
@@ -112,7 +112,7 @@ export default function Home() {
                 </div>
             </header>
 
-            <main className='mx-auto w-full max-w-6xl flex-1 px-4 py-6'>
+            <main className='mx-auto w-full max-w-7xl flex-1 px-4 py-6'>
                 <Tabs value={mainTab} onValueChange={setMainTab} className='gap-4'>
                     <TabsList>
                         <TabsTrigger value='overview'>Overview</TabsTrigger>
@@ -129,23 +129,24 @@ export default function Home() {
                                 </CardDescription>
                             </CardHeader>
                             <CardContent className='space-y-6'>
-                                <div className='space-y-2'>
-                                    <Label htmlFor='job-name'>Job name</Label>
-                                    <p className='text-xs text-muted-foreground'>
-                                        Filled automatically from the CSV file name when the file validates; required before starting.
-                                    </p>
-                                    <Input
-                                        id='job-name'
-                                        value={jobName}
-                                        onChange={(e) => setJobName(e.target.value)}
-                                        placeholder='e.g. Fleet batch 2026-04-30'
-                                        className='max-w-xl'
-                                    />
-                                </div>
+                                <div className='mx-auto w-full max-w-2xl space-y-6'>
+                                    <div className='space-y-2 text-center'>
+                                        <Label htmlFor='job-name'>Job name</Label>
+                                        <p className='text-xs text-muted-foreground'>
+                                            Filled automatically from the CSV file name when the file validates; required before starting.
+                                        </p>
+                                        <Input
+                                            id='job-name'
+                                            value={jobName}
+                                            onChange={(e) => setJobName(e.target.value)}
+                                            placeholder='e.g. Fleet batch 2026-04-30'
+                                            className='mx-auto max-w-xl text-center'
+                                        />
+                                    </div>
 
-                                <div className='space-y-2'>
-                                    <Label>CSV file</Label>
-                                    <input
+                                    <div className='space-y-2 text-center'>
+                                        <Label>CSV file</Label>
+                                        <input
                                         ref={fileInputRef}
                                         type='file'
                                         accept='.csv,text/csv'
@@ -168,7 +169,7 @@ export default function Home() {
                                         onDragOver={(e) => e.preventDefault()}
                                         onDrop={onDrop}
                                         className={cn(
-                                            "group flex w-full max-w-2xl flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-12 text-center transition-colors",
+                                            "group flex w-full flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-12 text-center transition-colors",
                                             "hover:border-primary/50 hover:bg-muted/40",
                                             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                                             dragActive && "border-primary bg-primary/5",
@@ -186,7 +187,7 @@ export default function Home() {
                                     </button>
 
                                     {csvFileName ?
-                                        <div className='flex max-w-2xl flex-wrap items-center gap-2 text-sm'>
+                                        <div className='flex flex-wrap items-center justify-center gap-2 text-sm'>
                                             <FileSpreadsheetIcon className='size-4 shrink-0 text-muted-foreground' aria-hidden />
                                             <span className='font-medium text-foreground'>{csvFileName}</span>
                                             {csvError ? null : (
@@ -212,14 +213,20 @@ export default function Home() {
                                     {csvError ?
                                         <div
                                             role='alert'
-                                            className='flex max-w-2xl gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive'>
+                                            className='flex gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive'>
                                             <AlertCircleIcon className='mt-0.5 size-4 shrink-0' aria-hidden />
                                             <span>{csvError}</span>
                                         </div>
                                     :   null}
 
-                                    <div className='flex flex-wrap items-center gap-2'>
-                                        <Button type='button' disabled={!canStart} onClick={() => void startScraping()}>
+                                    <div className='space-y-2'>
+                                        <Button
+                                            type='button'
+                                            size='lg'
+                                            className='h-11 w-full text-base font-semibold'
+                                            disabled={!canStart}
+                                            onClick={() => void startScraping()}
+                                        >
                                             {starting ?
                                                 <>
                                                     <Loader2Icon className='mr-2 size-4 animate-spin' aria-hidden />
@@ -227,10 +234,11 @@ export default function Home() {
                                                 </>
                                             :   "Start scraping"}
                                         </Button>
-                                        <p className='text-xs text-muted-foreground'>
+                                        <p className='text-xs text-muted-foreground text-center'>
                                             Needs a validated CSV and a non-empty job name. Runs the Playwright worker on this machine
                                             (not on Vercel serverless).
                                         </p>
+                                    </div>
                                     </div>
                                 </div>
                             </CardContent>

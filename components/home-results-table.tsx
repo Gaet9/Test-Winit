@@ -52,68 +52,33 @@ function badgeVariant(state: string): "default" | "secondary" | "destructive" | 
     return "outline";
 }
 
-function disputeVariant(classification: string | null | undefined): "default" | "secondary" | "destructive" | "outline" {
-    const c = (classification ?? "").toLowerCase();
-    if (c === "disputable") return "default";
-    if (c === "conditionally disputable") return "secondary";
-    if (c === "not disputable") return "destructive";
-    return "outline";
+function shortStateLabel(state: string): string {
+    const s = (state ?? "").toLowerCase().trim();
+    if (!s) return "—";
+    if (s === "scraping_complete" || s === "succeeded") return "done";
+    if (s === "initiating") return "init";
+    if (s === "searching") return "search";
+    if (s === "scraping") return "scrape";
+    if (s === "queued") return "queued";
+    if (s === "running") return "run";
+    if (s === "failed") return "failed";
+    return s.replace(/_/g, " ");
 }
 
-function resolveLineDisputeClassification(
-    r: ScrapeResultLineRow,
-    archiveRuns: WorkerScrapeRunArchive[],
-): string | null {
-    if (r.source !== "archive") return null;
-    const run = archiveRuns.find((x) => x.id === r.runId);
-    if (!run) return null;
-    const arr = (run.dispute_analysis as unknown) as unknown[];
-    if (!Array.isArray(arr)) return null;
-    const line = arr[r.lineIndex - 1] as Record<string, unknown> | undefined;
-    const cases = (line && (line.cases as unknown)) as unknown[] | undefined;
-    if (!Array.isArray(cases) || cases.length === 0) return null;
-    const classes = cases
-        .map((c) => (c as Record<string, unknown>)?.analysis as Record<string, unknown> | undefined)
-        .map((a) => (a?.classification as string | undefined) ?? "")
-        .filter(Boolean);
-    if (!classes.length) return null;
-    if (classes.some((x) => x === "DISPUTABLE")) return "DISPUTABLE";
-    if (classes.some((x) => x === "CONDITIONALLY DISPUTABLE")) return "CONDITIONALLY DISPUTABLE";
-    return "NOT DISPUTABLE";
-}
-
-function resolveLineDisputeSummary(
-    r: ScrapeResultLineRow,
-    archiveRuns: WorkerScrapeRunArchive[],
-): { classification: string; recommended_action: string } | null {
-    if (r.source !== "archive") return null;
-    const run = archiveRuns.find((x) => x.id === r.runId);
-    if (!run) return null;
-    const arr = run.dispute_analysis as unknown;
-    if (!Array.isArray(arr)) return null;
-    const line = arr[r.lineIndex - 1] as Record<string, unknown> | undefined;
-    const cases = (line && (line.cases as unknown)) as unknown[] | undefined;
-    if (!Array.isArray(cases) || cases.length === 0) return null;
-
-    const analyses = cases
-        .map((c) => (c as Record<string, unknown>)?.analysis as Record<string, unknown> | undefined)
-        .filter(Boolean);
-    if (!analyses.length) return null;
-
-    const pick = (cls: string) =>
-        analyses.find((a) => (a?.classification as string | undefined) === cls) ?? null;
-
-    const best =
-        pick("DISPUTABLE") ??
-        pick("CONDITIONALLY DISPUTABLE") ??
-        pick("NOT DISPUTABLE") ??
-        null;
-    if (!best) return null;
-
-    const classification = (best.classification as string | undefined) ?? "";
-    const recommended_action = (best.recommended_action as string | undefined) ?? "";
-    if (!classification) return null;
-    return { classification, recommended_action };
+function formatShortDateTime(isoLike: string): string {
+    const d = new Date(isoLike);
+    if (Number.isNaN(d.getTime())) return "—";
+    // Example: "May 1, 02:41"
+    try {
+        return new Intl.DateTimeFormat(undefined, {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+        }).format(d);
+    } catch {
+        return d.toLocaleString();
+    }
 }
 
 function resolveArchiveLineExportItem(r: ScrapeResultLineRow, archiveRuns: WorkerScrapeRunArchive[]): Record<string, unknown> | null {
@@ -195,7 +160,13 @@ function ResultsSection({
     hasMore: boolean;
     onEndReached: () => void;
 }) {
-    type SortKey = "source" | "run" | "label" | "dispute" | "state" | "progress" | "detail" | "updated" | "cases";
+    const shortRun = React.useCallback((name: string) => {
+        const n = (name ?? "").trim();
+        if (n.length <= 20) return n;
+        return `${n.slice(0, 10)}…${n.slice(-7)}`;
+    }, []);
+
+    type SortKey = "source" | "run" | "label" | "state" | "progress" | "detail" | "updated" | "cases";
     const [sortKey, setSortKey] = React.useState<SortKey>("updated");
     const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
 
@@ -228,8 +199,6 @@ function ResultsSection({
                     return new Date(r.updatedAt).getTime() || 0;
                 case "detail":
                     return r.message ?? "";
-                case "dispute":
-                    return resolveLineDisputeClassification(r, archiveRuns) ?? "";
                 case "cases":
                     return resolveArchiveLineCaseCount(r, archiveRuns) ?? -1;
                 default:
@@ -268,7 +237,7 @@ function ResultsSection({
                 <p className='text-xs text-muted-foreground'>{description}</p>
             </div>
             <div className='w-full overflow-x-auto rounded-md border'>
-                <Table className='min-w-[720px]'>
+                <Table className='min-w-[840px]'>
                     <TableCaption>
                         {rows.length ? `${rows.length} row(s). Click a row for full export detail.` : emptyHint}
                     </TableCaption>
@@ -282,9 +251,6 @@ function ResultsSection({
                             </TableHead>
                             <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("label")}>
                                 Label
-                            </TableHead>
-                            <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("dispute")}>
-                                Dispute
                             </TableHead>
                             <TableHead className='cursor-pointer select-none' onClick={() => toggleSort("state")}>
                                 State
@@ -318,31 +284,20 @@ function ResultsSection({
                                 <TableCell className='hidden sm:table-cell text-muted-foreground text-xs capitalize'>
                                     {r.source}
                                 </TableCell>
-                                <TableCell className='font-mono text-xs whitespace-nowrap'>
-                                    {r.runName}
-                                    <br />
-                                    <span className='text-muted-foreground'>#{r.lineIndex}</span>
+                                <TableCell className='font-mono text-xs whitespace-nowrap max-w-[160px]'>
+                                    <span title={r.runName} className='block truncate'>
+                                        {shortRun(r.runName)}
+                                    </span>
+                                    <span className='text-muted-foreground'> · #{r.lineIndex}</span>
                                 </TableCell>
-                                <TableCell className='max-w-[220px] sm:max-w-[320px] truncate'>{r.lineLabel}</TableCell>
-                                <TableCell className='max-w-[260px]'>
-                                    {(() => {
-                                        const s = resolveLineDisputeSummary(r, archiveRuns);
-                                        if (!s) return <span className='text-muted-foreground'>—</span>;
-                                        return (
-                                            <div className='space-y-1'>
-                                                <Badge variant={disputeVariant(s.classification)}>{s.classification}</Badge>
-                                                {s.recommended_action ?
-                                                    <p className='text-xs text-muted-foreground line-clamp-2'>{s.recommended_action}</p>
-                                                :   null}
-                                            </div>
-                                        );
-                                    })()}
+                                <TableCell title={r.lineLabel} className='max-w-[220px] sm:max-w-[320px]'>
+                                    <span className='block wrap-break-word line-clamp-2'>{r.lineLabel}</span>
                                 </TableCell>
                                 <TableCell>
-                                    <Badge variant={badgeVariant(r.state)}>{r.state}</Badge>
+                                    <Badge variant={badgeVariant(r.state)}>{shortStateLabel(r.state)}</Badge>
                                 </TableCell>
                                 <TableCell className='text-right tabular-nums whitespace-nowrap'>{r.progressPct}%</TableCell>
-                                <TableCell className='hidden md:table-cell max-w-[320px] truncate text-muted-foreground text-sm'>
+                                <TableCell className='hidden md:table-cell max-w-[320px] truncate text-muted-foreground text-sm' title={r.message || ""}>
                                     {(() => {
                                         const issue = resolveLineIssueKind(r);
                                         const cases = resolveArchiveLineCaseCount(r, archiveRuns);
@@ -359,7 +314,7 @@ function ResultsSection({
                                     })()}
                                 </TableCell>
                                 <TableCell className='hidden lg:table-cell text-xs text-muted-foreground whitespace-nowrap'>
-                                    {new Date(r.updatedAt).toLocaleString()}
+                                    {formatShortDateTime(r.updatedAt)}
                                 </TableCell>
                             </TableRow>
                         ))}
@@ -526,7 +481,6 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
 
     const rowToExportFields = React.useCallback(
         (r: ScrapeResultLineRow) => {
-            const dispute = resolveLineDisputeSummary(r, archiveRuns);
             const issue = resolveLineIssueKind(r);
             const caseCount = resolveArchiveLineCaseCount(r, archiveRuns);
             return {
@@ -535,8 +489,6 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
             runName: r.runName,
             lineIndex: r.lineIndex,
             lineLabel: r.lineLabel,
-            disputeClassification: dispute?.classification ?? "",
-            disputeRecommendedAction: dispute?.recommended_action ?? "",
             caseCount: caseCount ?? "",
             issueKind: issue ?? "",
             state: r.state,

@@ -47,26 +47,6 @@ function isRecord(v: unknown): v is Record<string, unknown> {
     return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function resolveArchiveLineSummary(
-    row: ScrapeResultLineRow,
-    runs: WorkerScrapeRunArchive[],
-): DisputeAnalysis | null {
-    if (row.source !== "archive") return null;
-    const run = runs.find((r) => r.id === row.runId);
-    if (!run) return null;
-    const arr = run.dispute_analysis;
-    if (!Array.isArray(arr)) return null;
-    const line = arr[row.lineIndex - 1];
-    if (!isRecord(line)) return null;
-    const cases = line.cases;
-    if (!Array.isArray(cases) || cases.length === 0) return null;
-    const analyses = cases
-        .map((c) => (isRecord(c) ? (c.analysis as unknown) : null))
-        .filter((a) => isRecord(a)) as DisputeAnalysis[];
-    const pick = (cls: DisputeAnalysis["classification"]) => analyses.find((a) => a.classification === cls) ?? null;
-    return pick("DISPUTABLE") ?? pick("CONDITIONALLY DISPUTABLE") ?? pick("NOT DISPUTABLE") ?? null;
-}
-
 function resolveArchiveCaseAnalysis(
     row: ScrapeResultLineRow,
     runs: WorkerScrapeRunArchive[],
@@ -163,11 +143,6 @@ export function ResultLineDetailSheet(props: {
         return resolveLiveLineExport(liveLine);
     }, [row, liveLine]);
 
-    const lineAnalysis = React.useMemo(() => {
-        if (!row) return null;
-        return resolveArchiveLineSummary(row, archiveRuns);
-    }, [row, archiveRuns]);
-
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
             <SheetContent
@@ -195,31 +170,6 @@ export function ResultLineDetailSheet(props: {
                             </div>
                             {row.message ?
                                 <p className='text-sm text-muted-foreground'>{row.message}</p>
-                            :   null}
-
-                            {row.source === "archive" && lineAnalysis ?
-                                <>
-                                    <Separator />
-                                    <Card>
-                                        <CardHeader className='pb-2'>
-                                            <CardTitle className='text-base'>Dispute eligibility (summary)</CardTitle>
-                                            <CardDescription>Applies to this result line</CardDescription>
-                                        </CardHeader>
-                                        <CardContent className='space-y-2 text-sm'>
-                                            <div className='flex flex-wrap items-center gap-2'>
-                                                <Badge variant={disputeBadgeVariant(lineAnalysis.classification)}>
-                                                    {lineAnalysis.classification}
-                                                </Badge>
-                                                <span className='text-xs text-muted-foreground'>Confidence: {lineAnalysis.confidence}</span>
-                                            </div>
-                                            {lineAnalysis.recommended_action ?
-                                                <p className='text-sm'>
-                                                    <span className='text-muted-foreground'>Recommended:</span> {lineAnalysis.recommended_action}
-                                                </p>
-                                            :   null}
-                                        </CardContent>
-                                    </Card>
-                                </>
                             :   null}
 
                             {row.source === "live" && liveJob && liveLine ?

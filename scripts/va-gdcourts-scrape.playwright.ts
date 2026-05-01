@@ -202,11 +202,19 @@ async function exportCaseDetailLabelValues(page: Page): Promise<ExportedTable[]>
       const label = norm(labelRaw).replace(/:\s*$/, "")
       const value = norm(valueRaw)
       if (!label || !value) return
+      // Hard guards against noisy captures (navigation/script blobs).
+      if (label.length > 60 || value.length > 200) return
+      const bad = /function\s+\w+|\bvar\b|document\.getelementbyid|clientsearchcounter|name search|case number search|hearing date search|service\/process search/i
+      if (bad.test(label) || bad.test(value)) return
       const k = `${label}\u0000${value}`
       if (seen.has(k)) return
       seen.add(k)
       mergedFields.push({ label, value })
     }
+
+    const isCivilPage = /civil/i.test(document.body?.innerText ?? "")
+    const labelLikeRe = /^[A-Za-z][A-Za-z0-9 /#()'".,-]{0,50}:\s*$/
+    const inlinePairRe = /^([A-Za-z][A-Za-z0-9 /#()'".,-]{0,50}):\s*(.{1,120})$/
 
     const tables = Array.from(document.querySelectorAll("table")).filter((t) => {
       const rect = (t as HTMLElement).getBoundingClientRect()
@@ -235,15 +243,17 @@ async function exportCaseDetailLabelValues(page: Page): Promise<ExportedTable[]>
             continue
           }
 
-          // Fallback: civil layouts often have "Label : Value" without labelgrid classes,
-          // sometimes with multiple pairs on one row (e.g. Case Number : X  Filed Date : Y).
-          if (text.includes(":")) {
-            const parts = text.split(":")
-            if (parts.length >= 2) {
-              const label = parts[0] ?? ""
-              const inlineValue = parts.slice(1).join(":")
-              const value = norm(inlineValue) || norm(cells[i + 1]?.textContent ?? "")
-              pushField(label, value)
+          // Fallback (civil only): look for compact label cells that end with ":" and read value from next cell.
+          if (isCivilPage) {
+            if (labelLikeRe.test(text)) {
+              const next = cells[i + 1]
+              pushField(text, norm(next?.textContent ?? ""))
+              continue
+            }
+            // Or an inline "Label: Value" pair when both sides are small.
+            const m = text.match(inlinePairRe)
+            if (m) {
+              pushField(m[1] ?? "", m[2] ?? "")
               continue
             }
           }
