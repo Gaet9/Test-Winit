@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { jobLinesToResultRows } from "@/lib/scrape-result-mappers";
 
@@ -305,11 +306,19 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
             </div>
 
             {liveJob ?
-                <p className='text-sm text-muted-foreground'>
-                    Live job: <span className='font-medium text-foreground'>{liveJob.name}</span> —{" "}
-                    <span className='tabular-nums'>{liveJob.progress_pct}%</span> overall ({liveJob.state}
-                    {liveJob.detail_message ? `: ${liveJob.detail_message}` : ""})
-                </p>
+                <div className='space-y-2'>
+                    <p className='text-sm text-muted-foreground'>
+                        Live job: <span className='font-medium text-foreground'>{liveJob.name}</span> —{" "}
+                        <span className='tabular-nums'>{liveJob.progress_pct}%</span> overall ({liveJob.state}
+                        {liveJob.detail_message ? `: ${liveJob.detail_message}` : ""})
+                    </p>
+                    <div className='flex items-center gap-3'>
+                        <Progress value={liveJob.progress_pct} className='h-2 flex-1' />
+                        <span className='text-xs tabular-nums text-muted-foreground w-12 text-right'>
+                            {liveJob.progress_pct}%
+                        </span>
+                    </div>
+                </div>
             :   null}
 
             <div className='space-y-8'>

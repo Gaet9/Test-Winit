@@ -145,13 +145,20 @@ _EXPORT_CASE_DETAIL_FIELDS_JS = r"""() => {
     const cn = el.className || "";
     return typeof cn === "string" && cn.includes("labelgrid");
   }
+  function looksLikeAnotherLabelCell(el) {
+    if (!el) return false;
+    if (!isLabelCell(el)) return false;
+    const t = norm(el.textContent || "");
+    return /:\s*$/.test(t);
+  }
   const tables = Array.from(document.querySelectorAll("table")).filter((t) => {
     const rect = t.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   });
-  const out = [];
+  // Keep payload compact: merge all label/value fields across all tables into one list.
+  const fields = [];
+  const seen = new Set();
   for (const table of tables) {
-    const fields = [];
     for (const tr of table.querySelectorAll("tr")) {
       const cells = Array.from(tr.querySelectorAll("td, th"));
       for (let i = 0; i < cells.length; i++) {
@@ -160,16 +167,16 @@ _EXPORT_CASE_DETAIL_FIELDS_JS = r"""() => {
         let rawLabel = norm(td.textContent);
         rawLabel = rawLabel.replace(/:\s*$/, "");
         const next = cells[i + 1];
-        const nextCn = next ? String(next.className || "") : "";
-        const value = next && !nextCn.includes("labelgrid") ? norm(next.textContent) : "";
-        if (!rawLabel && !value) continue;
+        const value = next && !looksLikeAnotherLabelCell(next) ? norm(next.textContent) : "";
+        if (!rawLabel || !value) continue;
+        const k = `${rawLabel}\u0000${value}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
         fields.push({ label: rawLabel, value });
       }
     }
-    if (fields.length === 0) continue;
-    out.push({ title: guessTitle(table), fields });
   }
-  return out;
+  return fields.length ? [{ title: "Case detail", fields }] : [];
 }"""
 
 

@@ -185,18 +185,17 @@ async function exportCaseDetailLabelValues(page: Page): Promise<ExportedTable[]>
         .replace(/\s+/g, " ")
         .trim()
 
-    function guessTitle(table: HTMLTableElement): string | undefined {
-      const prev = table.closest("td")?.previousElementSibling
-      const t1 = prev ? norm(prev.textContent ?? "") : ""
-      if (t1) return t1
-      const headerTd = table.querySelector("td.subheader, td.pageheader, th")
-      const t2 = headerTd ? norm(headerTd.textContent ?? "") : ""
-      return t2 || undefined
-    }
-
     function isLabelCell(el: Element): boolean {
       const cn = (el as HTMLElement).className
       return typeof cn === "string" && cn.includes("labelgrid")
+    }
+
+    function looksLikeAnotherLabelCell(el: Element | undefined): boolean {
+      if (!el) return false
+      if (!isLabelCell(el)) return false
+      const t = norm(el.textContent ?? "")
+      // On the VA pages, label cells typically end with ":" (or ": ").
+      return /:\s*$/.test(t)
     }
 
     const tables = Array.from(document.querySelectorAll("table")).filter((t) => {
@@ -204,11 +203,13 @@ async function exportCaseDetailLabelValues(page: Page): Promise<ExportedTable[]>
       return rect.width > 0 && rect.height > 0
     })
 
-    const out: Array<{ title?: string; fields: Array<{ label: string; value: string }> }> = []
+    // To keep Supabase payloads compact, we merge all extracted fields across all tables
+    // into a single section and dedupe repeated label/value pairs.
+    const mergedFields: Array<{ label: string; value: string }> = []
+    const seen = new Set<string>()
 
     for (const t of tables) {
       const table = t as HTMLTableElement
-      const fields: Array<{ label: string; value: string }> = []
       for (const tr of table.querySelectorAll("tr")) {
         const cells = Array.from(tr.querySelectorAll("td, th"))
         for (let i = 0; i < cells.length; i++) {
@@ -216,18 +217,20 @@ async function exportCaseDetailLabelValues(page: Page): Promise<ExportedTable[]>
           if (!isLabelCell(td)) continue
           const rawLabel = norm(td.textContent ?? "").replace(/:\s*$/, "")
           const next = cells[i + 1]
-          const nextCn = next ? String((next as HTMLElement).className || "") : ""
-          const value =
-            next && !nextCn.includes("labelgrid") ? norm(next.textContent ?? "") : ""
-          if (!rawLabel && !value) continue
-          fields.push({ label: rawLabel, value })
+          const valueCandidate = next && !looksLikeAnotherLabelCell(next) ? norm(next.textContent ?? "") : ""
+          const value = valueCandidate
+
+          // Reduce noise: skip empty values, and avoid repeated pairs.
+          if (!rawLabel || !value) continue
+          const k = `${rawLabel}\u0000${value}`
+          if (seen.has(k)) continue
+          seen.add(k)
+          mergedFields.push({ label: rawLabel, value })
         }
       }
-      if (fields.length === 0) continue
-      out.push({ title: guessTitle(table), fields })
     }
 
-    return out
+    return mergedFields.length ? [{ title: "Case detail", fields: mergedFields }] : []
   })
 }
 
@@ -299,7 +302,9 @@ export async function runVaGdcourtsFlow(
       ...linePatch,
       updated_at: now,
     }
-    const { progress_pct: _drop, ...restJob } = jobPatch
+    // Disallow callers from setting job progress directly; overall is always computed as avg(line progress).
+    const restJob = { ...(jobPatch as Record<string, unknown>) }
+    delete (restJob as Record<string, unknown>).progress_pct
     await updateScrapeJob(progress.supabase, progress.jobId, {
       lines_state: lineStates,
       progress_pct: averageLineProgressPct(lineStates),
@@ -590,7 +595,6 @@ async function main() {
 
 // Allow importing from the app without auto-running.
 if (require.main === module) {
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
-  main()
+  void main()
 }
 
