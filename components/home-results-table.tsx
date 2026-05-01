@@ -500,20 +500,24 @@ function ResultsSection({
                                     <Badge variant={badgeVariant(r.state)}>{shortStateLabel(r.state)}</Badge>
                                 </TableCell>
                                 <TableCell className='text-right tabular-nums whitespace-nowrap'>{r.progressPct}%</TableCell>
-                                <TableCell className='hidden md:table-cell max-w-[320px] truncate text-muted-foreground text-sm' title={r.message || ""}>
+                                <TableCell className='hidden md:table-cell w-[320px] max-w-[320px] text-muted-foreground text-sm'>
                                     {(() => {
                                         const issue = resolveLineIssueKind(r);
                                         const cases = resolveArchiveLineCaseCount(r, archiveRuns);
-                                        if (issue === "site_down") {
-                                            return <span className='text-destructive font-medium'>Site down / network error</span>;
-                                        }
-                                        if (issue === "scrape_error") {
-                                            return <span className='text-destructive font-medium'>Scrape error</span>;
-                                        }
-                                        if (cases === 0) {
-                                            return <span className='text-muted-foreground font-medium'>No cases found</span>;
-                                        }
-                                        return r.message || "—";
+                                        const text =
+                                            issue === "site_down" ? "Site down / network error"
+                                            : issue === "scrape_error" ? "Scrape error"
+                                            : cases === 0 ? "No cases found"
+                                            : r.message || "—";
+                                        const tone =
+                                            issue ? "text-destructive font-medium"
+                                            : cases === 0 ? "text-muted-foreground font-medium"
+                                            : "text-muted-foreground";
+                                        return (
+                                            <span title={text} className={`block truncate ${tone}`}>
+                                                {text}
+                                            </span>
+                                        );
                                     })()}
                                 </TableCell>
                                 <TableCell className='hidden lg:table-cell text-xs text-muted-foreground whitespace-nowrap'>

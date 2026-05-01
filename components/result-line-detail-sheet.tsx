@@ -27,6 +27,7 @@ type VaCase = {
     url?: string;
     exportedAt?: string;
     tables?: VaTable[];
+    analysis?: unknown;
 };
 
 type VaLineExport = {
@@ -267,12 +268,19 @@ function ArchiveExportBody({
             {(data.cases ?? []).length === 0 ?
                 <p className='text-sm text-muted-foreground'>No cases linked for this search.</p>
             :   (data.cases ?? []).map((c, i) => (
+                    (() => {
+                        const embedded = isRecord(c) && isRecord(c.analysis) ? (c.analysis as DisputeAnalysis) : null;
+                        const fromRun = resolveArchiveCaseAnalysis(row, archiveRuns, c.caseIndex);
+                        const analysis = embedded ?? fromRun;
+                        return (
                     <CaseBlock
                         key={`${c.caseIdText ?? i}-${c.caseIndex ?? i}`}
                         caseIndex={i}
                         c={c}
-                        analysis={resolveArchiveCaseAnalysis(row, archiveRuns, c.caseIndex)}
+                        analysis={analysis}
                     />
+                        );
+                    })()
                 ))
             }
         </>

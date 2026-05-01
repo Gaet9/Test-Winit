@@ -60,6 +60,7 @@ export type CaseExport = {
     url: string
     exportedAt: string
     tables: ExportedTable[]
+    analysis?: unknown
   }>
 }
 
@@ -345,6 +346,63 @@ export async function runVaGdcourtsFlow(
 
   const exports: CaseExport[] = []
 
+  const analyzeFromTables = (tables: ExportedTable[]) => {
+    const t0 = tables?.[0] as unknown as { fields?: Array<{ label: string; value: string }> } | undefined
+    const fields = Array.isArray(t0?.fields) ? t0!.fields : []
+    const pick = (...keys: string[]) => {
+      const wants = keys.map((k) => k.toLowerCase())
+      for (const f of fields) {
+        const lab = String(f.label ?? "").toLowerCase()
+        if (!lab) continue
+        if (wants.some((w) => lab.includes(w))) return String(f.value ?? "").trim()
+      }
+      return ""
+    }
+    const disposition = pick("final disposition", "disposition", "judgment", "result")
+    const paid = pick("fine/costs paid", "payment status")
+    const paidDate = pick("fine/costs paid date", "payment date", "paid date")
+    const hearingDate = pick("hearing date", "court date", "trial date", "arraignment date")
+    const dispL = disposition.toLowerCase()
+    const paidL = paid.toLowerCase()
+    const dismissed = dispL.includes("dismiss") || dispL.includes("nolle") || dispL.includes("prosequi") || dispL.includes("not guilty")
+    if (dismissed) {
+      return {
+        classification: "NOT DISPUTABLE",
+        confidence: "HIGH",
+        reasoning: ["Final disposition indicates the matter was dismissed / not guilty (nothing to dispute)."],
+        key_factors: { disposition, payment: paid, hearing_date: hearingDate, paid_date: paidDate },
+        recommended_action: "Consider limited options (appeal if timely) or focus on compliance/record review.",
+      }
+    }
+    if (dispL.includes("prepaid")) {
+      return {
+        classification: "NOT DISPUTABLE",
+        confidence: "HIGH",
+        reasoning: ["Disposition indicates the ticket was prepaid/accepted."],
+        key_factors: { disposition, payment: paid, hearing_date: hearingDate, paid_date: paidDate },
+        recommended_action: "Consider limited options (appeal if timely) or focus on compliance/record review.",
+      }
+    }
+    const paidSignal = paidL.includes("paid") || paidL === "yes" || paidL === "true"
+    const guiltySignal = dispL.includes("guilty") && !dispL.includes("not guilty")
+    if (guiltySignal && paidSignal) {
+      return {
+        classification: "NOT DISPUTABLE",
+        confidence: "MEDIUM",
+        reasoning: ["Guilty disposition and payment indicate closure; dispute typically limited to timely appeal."],
+        key_factors: { disposition, payment: paid, hearing_date: hearingDate, paid_date: paidDate },
+        recommended_action: "Consider limited options (appeal if timely) or focus on compliance/record review.",
+      }
+    }
+    return {
+      classification: "CONDITIONALLY DISPUTABLE",
+      confidence: "LOW",
+      reasoning: ["Missing critical information; eligibility may depend on additional facts/documents."],
+      key_factors: { disposition, payment: paid, hearing_date: hearingDate, paid_date: paidDate },
+      recommended_action: "Check appeal/reopening eligibility urgently and gather supporting documents.",
+    }
+  }
+
   for (let lineIdx = 0; lineIdx < rows.length; lineIdx++) {
     const row = rows[lineIdx]
     const lineNo = lineIdx + 1
@@ -411,6 +469,7 @@ export async function runVaGdcourtsFlow(
         url: page.url(),
         exportedAt: new Date().toISOString(),
         tables,
+        analysis: analyzeFromTables(tables),
       })
 
       await backToResults(page)

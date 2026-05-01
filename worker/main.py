@@ -1174,6 +1174,15 @@ async def scrape_one_row(
             wl(f"scrape case {i + 1}/{n_case} detail page loaded {label}")
             tables = await export_all_tables_on_page(page)
             wl(f"scrape case {i + 1}/{n_case} label_sections={len(tables)} id={case_id_text!r} {label}")
+            # Embed dispute analysis per case immediately (so UI can show it before the whole job finishes).
+            try:
+                t0 = tables[0] if isinstance(tables, list) and len(tables) > 0 else {}
+                fields = t0.get("fields") if isinstance(t0, dict) else None
+                fields_arr = list(fields) if isinstance(fields, list) else []
+                case_analysis = analyze_dispute_eligibility_for_case(fields_arr, now=datetime.now(timezone.utc))
+            except Exception as ae:
+                wl(f"case analysis failed (non-fatal): {ae!r} {label}")
+                case_analysis = None
             if job_id and sb is not None:
                 await bump_line_progress(
                     sb,
@@ -1193,6 +1202,7 @@ async def scrape_one_row(
                     "url": page.url,
                     "exportedAt": datetime.now(timezone.utc).isoformat(),
                     "tables": tables,
+                    "analysis": case_analysis,
                 }
             )
             await back_to_results(page)
