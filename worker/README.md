@@ -45,9 +45,9 @@ Use this when the Next app on **Vercel** calls `RENDER_WORKER_URL` with `POST /r
 
 - Repo root on Render, **Dockerfile path**: `Dockerfile.scrape` (see repo root).
 - Env on Render:
-  - `WORKER_WEBHOOK_SECRET` (same value as on Vercel)
-  - `SUPABASE_SERVICE_ROLE_KEY`
-  - **Project URL:** `NEXT_PUBLIC_SUPABASE_URL` **or** `SUPABASE_URL` (if only `SUPABASE_URL` was set before, progress stayed at 0% — the TS worker now accepts both)
+    - `WORKER_WEBHOOK_SECRET` (same value as on Vercel)
+    - `SUPABASE_SERVICE_ROLE_KEY`
+    - **Project URL:** `NEXT_PUBLIC_SUPABASE_URL` **or** `SUPABASE_URL` (if only `SUPABASE_URL` was set before, progress stayed at 0% — the TS worker now accepts both)
 - **Vercel** env: `RENDER_WORKER_URL` = `https://<your-service>.onrender.com` (no `/run` suffix), same `WORKER_WEBHOOK_SECRET`.
 - Health: `GET /health` on the service.
 
@@ -63,6 +63,6 @@ Start locally: `npm run worker:render-webhook` (set `PORT`, `WORKER_WEBHOOK_SECR
     - `WORKER_WEBHOOK_SECRET` (required if set — Next sends `Authorization: Bearer …` when forwarding)
     - optional: `WORKER_CONCURRENCY`, `WORKER_HEADLESS`
 
-Note: the Python `/run` path does not yet write to the same **`worker_scrape_jobs`** rows as the TypeScript scraper; use **Option A** for identical progress in the Results tab.
+Note: the Python worker still does **not** update **`worker_scrape_jobs`** (live SSE / progress bar). It **does** export case tables and inserts a row into **`worker_scrape_runs`** after each job (same archive shape as the TS worker) when Supabase env is set — refresh **Results** in the Next app to see archived lines.
 
-**Logs look empty?** Ensure the image sets `PYTHONUNBUFFERED=1` (see `worker/Dockerfile`). If you see `execute_job abort: 0 rows`, Vercel must send a `rows` array in the JSON body, or you must load rows from a real `job_items` table — otherwise `asyncio.gather()` runs zero tasks and nothing happens.
+**Logs look empty?** The worker logs `[va-worker] …` to stdout and stderr with flush. `PYTHONUNBUFFERED=1` is set in `worker/Dockerfile`. Scrape failures are logged and **re-raised** so uvicorn still prints `ERROR: Exception in ASGI application` with a traceback (same as before we swallowed errors). If you see `RuntimeError: … 0 rows`, the request had no `rows` and no `job_items` data for `job_id`.
