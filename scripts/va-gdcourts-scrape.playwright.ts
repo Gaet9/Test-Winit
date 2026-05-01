@@ -428,6 +428,8 @@ export async function persistWorkerScrapeRunToSupabase(options: {
   name: string
   lineCount: number
   results: CaseExport[]
+  /** When set, replaces any prior archive row for this job so only one DB row holds all CSV lines. */
+  scrapeJobId?: string
 }) {
   const url = resolveSupabaseProjectUrl()
   const key = resolveSupabaseServiceRoleKey()
@@ -439,15 +441,26 @@ export async function persistWorkerScrapeRunToSupabase(options: {
   }
   const supabase = createClient(url, key)
   const now = new Date()
-  const { error } = await supabase.from("worker_scrape_runs").insert({
+  const scrapeJobId = options.scrapeJobId?.trim()
+  if (scrapeJobId) {
+    const { error: delErr } = await supabase.from("worker_scrape_runs").delete().eq("scrape_job_id", scrapeJobId)
+    if (delErr) throw delErr
+  }
+  const row = {
     name: options.name,
     run_date: now.toISOString().slice(0, 10),
     processed_at: now.toISOString(),
     line_count: options.lineCount,
     results: options.results,
-  })
+    ...(scrapeJobId ? { scrape_job_id: scrapeJobId } : {}),
+  }
+  const { error } = await supabase.from("worker_scrape_runs").insert(row)
   if (error) throw error
-  console.log("[worker] Inserted worker_scrape_runs row:", options.name)
+  console.log(
+    "[worker] worker_scrape_runs row written:",
+    options.name,
+    scrapeJobId ? `(scrape_job_id=${scrapeJobId}, single row per job)` : "(no job id, append)"
+  )
 }
 
 function parseCliArgs(argv: string[]) {
@@ -557,6 +570,7 @@ async function main() {
       name,
       lineCount: rows.length,
       results: exports,
+      scrapeJobId: jobId,
     })
   }
 }

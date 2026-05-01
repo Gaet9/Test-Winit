@@ -11,6 +11,16 @@ type RunRow = {
   name: string
   processed_at: string
   results: unknown
+  scrape_job_id?: string | null
+}
+
+/** Full run row from DB (for detail UI). */
+export type WorkerScrapeRunArchive = {
+  id: string
+  name: string
+  processed_at: string
+  results: unknown
+  scrape_job_id?: string | null
 }
 
 export type WorkerScrapeRunLatest = {
@@ -19,26 +29,35 @@ export type WorkerScrapeRunLatest = {
   processed_at: string
   line_count: number | null
   results: unknown
+  scrape_job_id?: string | null
 }
 
-/** Flatten completed `worker_scrape_runs` into per-CSV-line rows for the Results table. */
-export async function fetchArchivedResultLines(
+/** One query: flattened table rows plus full runs for line-detail modals. */
+export async function fetchScrapeArchiveBundle(
   supabase: SupabaseClient,
   runLimit = 50
-): Promise<ScrapeResultLineRow[]> {
+): Promise<{ lines: ScrapeResultLineRow[]; runs: WorkerScrapeRunArchive[] }> {
   const { data, error } = await supabase
     .from("worker_scrape_runs")
-    .select("id,name,processed_at,results")
+    .select("id,name,processed_at,results,scrape_job_id")
     .order("processed_at", { ascending: false })
     .limit(runLimit)
 
   if (error) {
     console.error("[scrape-results]", error.message)
-    return []
+    return { lines: [], runs: [] }
   }
 
-  const out: ScrapeResultLineRow[] = []
-  for (const run of (data ?? []) as RunRow[]) {
+  const runs: WorkerScrapeRunArchive[] = ((data ?? []) as RunRow[]).map((run) => ({
+    id: run.id,
+    name: run.name,
+    processed_at: run.processed_at,
+    results: run.results,
+    scrape_job_id: run.scrape_job_id ?? null,
+  }))
+
+  const lines: ScrapeResultLineRow[] = []
+  for (const run of runs) {
     const arr = run.results
     if (!Array.isArray(arr)) continue
     arr.forEach((item: { row?: { firstName?: string; lastName?: string; court?: string }; cases?: unknown[] }, idx: number) => {
@@ -47,7 +66,7 @@ export async function fetchArchivedResultLines(
       const last = (r.lastName ?? "").toString()
       const court = (r.court ?? "").toString()
       const cases = Array.isArray(item.cases) ? item.cases.length : 0
-      out.push({
+      lines.push({
         key: `archive-${run.id}-${idx}`,
         source: "archive",
         runId: run.id,
@@ -61,7 +80,16 @@ export async function fetchArchivedResultLines(
       })
     })
   }
-  return out
+  return { lines, runs }
+}
+
+/** Flatten completed `worker_scrape_runs` into per-CSV-line rows for the Results table. */
+export async function fetchArchivedResultLines(
+  supabase: SupabaseClient,
+  runLimit = 50
+): Promise<ScrapeResultLineRow[]> {
+  const { lines } = await fetchScrapeArchiveBundle(supabase, runLimit)
+  return lines
 }
 
 /** Newest archived run (full `results` JSON) for downloads / exports. */
@@ -70,7 +98,7 @@ export async function fetchLatestWorkerScrapeRun(
 ): Promise<WorkerScrapeRunLatest | null> {
   const { data, error } = await supabase
     .from("worker_scrape_runs")
-    .select("id,name,processed_at,line_count,results")
+    .select("id,name,processed_at,line_count,results,scrape_job_id")
     .order("processed_at", { ascending: false })
     .limit(1)
     .maybeSingle()
@@ -87,6 +115,7 @@ export async function fetchLatestWorkerScrapeRun(
     processed_at: row.processed_at as string,
     line_count: (row.line_count as number) ?? null,
     results: row.results,
+    scrape_job_id: (row.scrape_job_id as string) ?? null,
   }
 }
 

@@ -176,8 +176,18 @@ async def back_to_results(page: Page) -> None:
     await page.wait_for_load_state("domcontentloaded")
 
 
-def persist_worker_scrape_run(name: str, line_count: int, results: list[dict[str, Any]]) -> None:
-    """Append one archive row set for the Next.js Results tab (worker_scrape_runs)."""
+def persist_worker_scrape_run(
+    name: str,
+    line_count: int,
+    results: list[dict[str, Any]],
+    scrape_job_id: Optional[str] = None,
+) -> None:
+    """
+    Write one `worker_scrape_runs` row for the Next.js Results tab.
+
+    When scrape_job_id is set (normal Vercel + Render flow), any previous archive row for that
+    job is removed first so only a single row holds the full `results` array for all CSV lines.
+    """
     if not _SUPABASE_AVAILABLE:
         wl("persist_worker_scrape_run skipped: supabase package not installed")
         return
@@ -188,15 +198,23 @@ def persist_worker_scrape_run(name: str, line_count: int, results: list[dict[str
         return
     sb = create_client(url, key)
     now = datetime.now(timezone.utc)
-    row = {
+    row: dict[str, Any] = {
         "name": name,
         "run_date": now.date().isoformat(),
         "processed_at": now.isoformat(),
         "line_count": line_count,
         "results": results,
     }
+    jid = (scrape_job_id or "").strip()
+    if jid:
+        sb.table("worker_scrape_runs").delete().eq("scrape_job_id", jid).execute()
+        row["scrape_job_id"] = jid
+        wl(f"persist_worker_scrape_run replace job_id={jid!r} name={name!r} export_lines={line_count}")
     sb.table("worker_scrape_runs").insert(row).execute()
-    wl(f"persist_worker_scrape_run inserted name={name!r} export_lines={line_count} case_blocks={len(results)}")
+    wl(
+        f"persist_worker_scrape_run inserted name={name!r} export_lines={line_count} "
+        f"case_blocks={len(results)} scrape_job_id={jid or '—'}"
+    )
 
 
 def iso_now() -> str:
@@ -289,6 +307,48 @@ async def patch_worker_scrape_job_simple(sb: Any, lock: asyncio.Lock, job_id: st
 
     async with lock:
         await asyncio.to_thread(_run)
+
+
+async def bump_line_progress(
+    sb: Any,
+    job_lock: asyncio.Lock,
+    job_id: Optional[str],
+    line_idx_0: int,
+    line_no: int,
+    total_lines: int,
+    frac_in_line: float,
+    state: str,
+    line_message: str,
+    job_detail: str,
+) -> None:
+    """
+    Map sub-step progress within the current line to overall job progress_pct.
+
+    frac_in_line is 0..1 within this CSV line's work (browser → search → cases).
+    """
+    if sb is None or not job_id:
+        return
+    tl = max(total_lines, 1)
+    f = max(0.0, min(1.0, frac_in_line))
+    overall = min(99, round(((line_idx_0 + f) / tl) * 100))
+    await patch_worker_scrape_job_line(
+        sb,
+        job_lock,
+        job_id,
+        line_idx_0,
+        line_no,
+        {
+            "lineIndex": line_no,
+            "state": state,
+            "message": line_message,
+            "progress_pct": overall,
+        },
+        {
+            "state": state,
+            "detail_message": job_detail,
+            "progress_pct": overall,
+        },
+    )
 
 
 @app.get("/")
@@ -468,6 +528,7 @@ async def execute_job(
         wl(f"line START {label}")
         try:
             async with sem:
+                wl(f"line slot acquired concurrency={cfg.concurrency} idx={line_idx_0} {label}")
                 export_block = await scrape_one_row(
                     row,
                     job_id=job_id,
@@ -484,10 +545,11 @@ async def execute_job(
         return export_block
 
     try:
+        wl(f"execute_job gather start {len(rows)} parallel task(s) max_in_flight={cfg.concurrency}")
         exports = await asyncio.gather(*(run_one(r, i) for i, r in enumerate(rows)))
         wl(f"execute_job scrape OK job_id={job_id!r} lines={len(rows)} export_blocks={len(exports)}")
         try:
-            persist_worker_scrape_run(archive_name, len(exports), list(exports))
+            persist_worker_scrape_run(archive_name, len(exports), list(exports), scrape_job_id=job_id)
         except Exception as pe:
             wl(f"execute_job persist_worker_scrape_run FAILED: {pe!r}")
             traceback.print_exc()
@@ -536,34 +598,54 @@ async def scrape_one_row(
 
     line_no = line_idx_0 + 1
     tl = max(total_lines, 1)
-    base_overall = round((line_idx_0 / tl) * 100)
     if job_id and sb is not None:
-        await patch_worker_scrape_job_line(
+        await bump_line_progress(
             sb,
             job_lock,
             job_id,
             line_idx_0,
             line_no,
-            {
-                "lineIndex": line_no,
-                "state": "searching",
-                "message": f"Searching: {row.lastName}, {row.firstName} · {row.court}",
-                "progress_pct": base_overall,
-            },
-            {
-                "state": "searching",
-                "detail_message": f"Searching line {line_no} of {total_lines}",
-                "progress_pct": base_overall,
-            },
+            total_lines,
+            0.0,
+            "searching",
+            f"Searching: {row.lastName}, {row.firstName} · {row.court}",
+            f"Line {line_no}/{total_lines}: start (0%)",
         )
 
     async with async_playwright() as p:
         wl(f"scrape playwright START {label}")
         browser = await p.chromium.launch(headless=headless)
+        if job_id and sb is not None:
+            await bump_line_progress(
+                sb,
+                job_lock,
+                job_id,
+                line_idx_0,
+                line_no,
+                total_lines,
+                0.06,
+                "searching",
+                "Chromium launched",
+                f"Line {line_no}/{total_lines}: browser ready (~6%)",
+            )
+        wl(f"scrape browser launched pct≈{min(99, round(((line_idx_0 + 0.06) / tl) * 100))}% {label}")
         context = await browser.new_context()
         page = await context.new_page()
 
         await page.goto(landing_url, wait_until="domcontentloaded")
+        if job_id and sb is not None:
+            await bump_line_progress(
+                sb,
+                job_lock,
+                job_id,
+                line_idx_0,
+                line_no,
+                total_lines,
+                0.12,
+                "searching",
+                "GDC landing page loaded",
+                f"Line {line_no}/{total_lines}: landing (~12%)",
+            )
         wl(f"scrape landed {label}")
 
         # Optional "accept" step (best-effort).
@@ -578,7 +660,22 @@ async def scrape_one_row(
             if await safe_is_visible(loc):
                 await loc.click()
                 await page.wait_for_load_state("domcontentloaded")
+                wl(f"scrape disclaimer/accept clicked {label}")
                 break
+
+        if job_id and sb is not None:
+            await bump_line_progress(
+                sb,
+                job_lock,
+                job_id,
+                line_idx_0,
+                line_no,
+                total_lines,
+                0.16,
+                "searching",
+                "Disclaimer step done (if any)",
+                f"Line {line_no}/{total_lines}: post-disclaimer (~16%)",
+            )
 
         # Select court autocomplete (#txtcourts1).
         court_input = page.locator("#txtcourts1")
@@ -609,6 +706,21 @@ async def scrape_one_row(
                 await page.keyboard.press("Escape")
                 await page.wait_for_timeout(400)
 
+        if job_id and sb is not None:
+            await bump_line_progress(
+                sb,
+                job_lock,
+                job_id,
+                line_idx_0,
+                line_no,
+                total_lines,
+                0.24,
+                "searching",
+                f"Court field set: {row.court}",
+                f"Line {line_no}/{total_lines}: court selected (~24%)",
+            )
+        wl(f"scrape court selected {label}")
+
         # Click correct Name Search (division T or V).
         division = "V" if row.type == "civil" else "T"
         link = page.locator(
@@ -621,12 +733,39 @@ async def scrape_one_row(
             wl(f"scrape name-search click retry force=True {label}")
             await link.click(force=True, timeout=15_000)
         await page.wait_for_load_state("domcontentloaded")
+        if job_id and sb is not None:
+            await bump_line_progress(
+                sb,
+                job_lock,
+                job_id,
+                line_idx_0,
+                line_no,
+                total_lines,
+                0.32,
+                "searching",
+                "Name search form open",
+                f"Line {line_no}/{total_lines}: name-search page (~32%)",
+            )
         wl(f"scrape name-search page loaded {label}")
 
         # Fill search fields + submit.
         await page.locator("#localnamesearchlastname").wait_for(state="visible")
         await page.fill("#localnamesearchlastname", row.lastName)
         await page.fill("#localnamesearchfirstname", row.firstName)
+        if job_id and sb is not None:
+            await bump_line_progress(
+                sb,
+                job_lock,
+                job_id,
+                line_idx_0,
+                line_no,
+                total_lines,
+                0.40,
+                "searching",
+                "Name fields filled; submitting search",
+                f"Line {line_no}/{total_lines}: submit search (~40%)",
+            )
+        wl(f"scrape submitting name search {label}")
         await page.locator('input[type="submit"].submitBox[value="Search"]').click()
         await page.wait_for_load_state("networkidle", timeout=30_000)
         try:
@@ -638,10 +777,39 @@ async def scrape_one_row(
         except Exception as e:
             wl(f"scrape post-search (could not read title/url): {e!r} {label}")
 
+        if job_id and sb is not None:
+            await bump_line_progress(
+                sb,
+                job_lock,
+                job_id,
+                line_idx_0,
+                line_no,
+                total_lines,
+                0.50,
+                "searching",
+                "Results page loaded (post-search)",
+                f"Line {line_no}/{total_lines}: results DOM (~50%)",
+            )
+        wl(f"scrape post-search network settled {label}")
+
         initial_links = await list_case_link_locators(page)
         n_case = len(initial_links)
         wl(f"scrape results: {n_case} case link(s) {label}")
         link_count = max(n_case, 1)
+        if job_id and sb is not None:
+            await bump_line_progress(
+                sb,
+                job_lock,
+                job_id,
+                line_idx_0,
+                line_no,
+                total_lines,
+                0.56 if n_case else 0.88,
+                "scraping" if n_case else "searching",
+                f"Found {n_case} case link(s)" if n_case else "No case links — finishing line",
+                f"Line {line_no}/{total_lines}: {'cases to scrape' if n_case else 'zero results'} (~{56 if n_case else 88}%)",
+            )
+
         for i in range(n_case):
             fresh = await list_case_link_locators(page)
             if i >= len(fresh):
@@ -649,35 +817,63 @@ async def scrape_one_row(
                 break
             link_loc = fresh[i]
             case_id_text = ((await link_loc.text_content()) or "").strip() or None
-            intra = (i + 1) / link_count
-            overall = min(99, round(((line_idx_0 + intra) / tl) * 100))
+            # Case i progress: 0.56..0.98 of this line's slice (room before line-complete at 1.0).
+            span = 0.42
+            base_frac = 0.56 + span * (i / link_count)
+            mid_frac = 0.56 + span * ((i + 0.45) / link_count)
+            end_frac = 0.56 + span * ((i + 0.92) / link_count)
             if job_id and sb is not None:
-                await patch_worker_scrape_job_line(
+                await bump_line_progress(
                     sb,
                     job_lock,
                     job_id,
                     line_idx_0,
                     line_no,
-                    {
-                        "lineIndex": line_no,
-                        "state": "scraping",
-                        "message": f"Scraping line {line_no} (case {i + 1} of {n_case})",
-                        "progress_pct": overall,
-                    },
-                    {
-                        "state": "scraping",
-                        "detail_message": f"Scraping line {line_no} (case {i + 1})",
-                        "progress_pct": overall,
-                    },
+                    total_lines,
+                    base_frac,
+                    "scraping",
+                    f"Opening case {i + 1}/{n_case} ({case_id_text or '?'})",
+                    f"Line {line_no}/{total_lines}: case {i + 1}/{n_case} open",
                 )
+            wl(
+                f"scrape case {i + 1}/{n_case} open pct≈{min(99, round(((line_idx_0 + base_frac) / tl) * 100))}% "
+                f"id={case_id_text!r} {label}"
+            )
             await link_loc.click()
             await page.wait_for_load_state("domcontentloaded")
             try:
                 await page.wait_for_load_state("networkidle", timeout=30_000)
             except Exception:
                 pass
+            if job_id and sb is not None:
+                await bump_line_progress(
+                    sb,
+                    job_lock,
+                    job_id,
+                    line_idx_0,
+                    line_no,
+                    total_lines,
+                    mid_frac,
+                    "scraping",
+                    f"Extracting tables for case {i + 1}/{n_case}",
+                    f"Line {line_no}/{total_lines}: case detail page",
+                )
+            wl(f"scrape case {i + 1}/{n_case} detail page loaded {label}")
             tables = await export_all_tables_on_page(page)
             wl(f"scrape case {i + 1}/{n_case} tables={len(tables)} id={case_id_text!r} {label}")
+            if job_id and sb is not None:
+                await bump_line_progress(
+                    sb,
+                    job_lock,
+                    job_id,
+                    line_idx_0,
+                    line_no,
+                    total_lines,
+                    end_frac,
+                    "scraping",
+                    f"Exported {len(tables)} table(s); returning to results",
+                    f"Line {line_no}/{total_lines}: case {i + 1}/{n_case} extracted",
+                )
             item["cases"].append(
                 {
                     "caseIndex": i,

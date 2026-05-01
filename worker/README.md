@@ -77,6 +77,6 @@ Start locally: `npm run worker:render-webhook` (set `PORT`, `WORKER_WEBHOOK_SECR
     - `WORKER_WEBHOOK_SECRET` (required if set — Next sends `Authorization: Bearer …` when forwarding)
     - optional: `WORKER_CONCURRENCY`, `WORKER_HEADLESS`
 
-Note: the Python worker still does **not** update **`worker_scrape_jobs`** (live SSE / progress bar). It **does** export case tables and inserts a row into **`worker_scrape_runs`** after each job (same archive shape as the TS worker) when Supabase env is set — refresh **Results** in the Next app to see archived lines.
+Note: the Python worker updates **`worker_scrape_jobs`** for live SSE and writes **`worker_scrape_runs`** with **`scrape_job_id`** set to that job’s id. Each completed job keeps **one** archive row (full `results` array for every CSV line); retries replace the same row instead of stacking duplicates. Apply migration `20260430150000_worker_scrape_runs_link_job.sql` in Supabase before relying on `scrape_job_id`.
 
 **Logs look empty?** The worker logs `[va-worker] …` to stdout and stderr with flush. `PYTHONUNBUFFERED=1` is set in `worker/Dockerfile`. Scrape failures are logged and **re-raised** so uvicorn still prints `ERROR: Exception in ASGI application` with a traceback (same as before we swallowed errors). If you see `RuntimeError: … 0 rows`, the request had no `rows` and no `job_items` data for `job_id`.

@@ -1,7 +1,7 @@
 import { createSupabaseAdminClient } from "@/lib/supabase/admin"
 import {
-  fetchArchivedResultLines,
   fetchLatestWorkerScrapeRun,
+  fetchScrapeArchiveBundle,
   getLatestActiveJob,
 } from "@/lib/scrape-results-query"
 
@@ -10,19 +10,22 @@ export async function GET() {
   if (!supabase) {
     return Response.json({
       archive: [],
+      archiveRuns: [],
       activeJob: null,
+      latestRun: null,
       configured: false,
     })
   }
 
-  const [archive, activeJob, latestRun] = await Promise.all([
-    fetchArchivedResultLines(supabase),
+  const [bundle, activeJob, latestRun] = await Promise.all([
+    fetchScrapeArchiveBundle(supabase),
     getLatestActiveJob(supabase),
     fetchLatestWorkerScrapeRun(supabase),
   ])
 
   return Response.json({
-    archive,
+    archive: bundle.lines,
+    archiveRuns: bundle.runs,
     activeJob,
     latestRun,
     configured: true,
