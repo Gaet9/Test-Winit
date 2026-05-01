@@ -94,46 +94,151 @@ type DisputeClassification = "DISPUTABLE" | "CONDITIONALLY DISPUTABLE" | "NOT DI
 function resolveLineDisputeSummary(
     r: ScrapeResultLineRow,
     archiveRuns: WorkerScrapeRunArchive[],
+    liveJob: WorkerScrapeJobRow | null,
 ): { classification: DisputeClassification; recommended_action: string } | null {
-    if (r.source !== "archive") return null;
-    const run = archiveRuns.find((x) => x.id === r.runId);
-    if (!run) return null;
-    const arr = run.dispute_analysis as unknown;
-    if (!Array.isArray(arr)) return null;
-    const line = arr[r.lineIndex - 1] as Record<string, unknown> | undefined;
-    const cases = (line && (line.cases as unknown)) as unknown[] | undefined;
-    if (!Array.isArray(cases) || cases.length === 0) return null;
+    type Field = { label?: unknown; value?: unknown };
+    const now = new Date();
 
-    const analyses = cases
-        .map((c) => (c as Record<string, unknown>)?.analysis as Record<string, unknown> | undefined)
-        .filter(Boolean);
+    const norm = (s: unknown) => String(s ?? "").trim().toLowerCase();
+    const pick = (fields: Field[], ...keys: string[]) => {
+        const wants = keys.map((k) => k.toLowerCase());
+        for (const f of fields) {
+            const lab = norm(f.label);
+            if (!lab) continue;
+            if (wants.some((w) => lab.includes(w))) return String(f.value ?? "").trim();
+        }
+        return "";
+    };
+
+    const parseDate = (raw: string): Date | null => {
+        const s = raw.trim();
+        if (!s) return null;
+        const iso = new Date(s);
+        if (!Number.isNaN(iso.getTime())) return iso;
+        // US formats
+        const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+        if (m) {
+            const mm = Number(m[1]);
+            const dd = Number(m[2]);
+            const yy = Number(m[3].length === 2 ? `20${m[3]}` : m[3]);
+            const d = new Date(Date.UTC(yy, mm - 1, dd));
+            return Number.isNaN(d.getTime()) ? null : d;
+        }
+        return null;
+    };
+
+    const analyzeFields = (fields: Field[]) => {
+        const disposition = pick(fields, "final disposition", "disposition", "judgment", "result");
+        const paid = pick(fields, "fine/costs paid", "payment status");
+        const paidDate = pick(fields, "fine/costs paid date", "payment date", "paid date");
+        const hearingDate = pick(fields, "hearing date", "court date", "trial date", "arraignment date");
+
+        const dispL = norm(disposition);
+        const paidL = norm(paid);
+
+        const dismissed = dispL.includes("dismiss") || dispL.includes("nolle") || dispL.includes("prosequi") || dispL.includes("not guilty");
+        if (dismissed) {
+            return { classification: "NOT DISPUTABLE" as const, recommended_action: "Nothing to dispute (dismissed / not guilty)." };
+        }
+        if (dispL.includes("prepaid")) {
+            return { classification: "NOT DISPUTABLE" as const, recommended_action: "Ticket appears prepaid/accepted." };
+        }
+
+        const paidSignal = paidL.includes("paid") || paidL === "yes" || paidL === "true";
+        const guiltySignal = dispL.includes("guilty") && !dispL.includes("not guilty");
+
+        const hearingDt = parseDate(hearingDate);
+        if (hearingDt && now < hearingDt) {
+            return { classification: "DISPUTABLE" as const, recommended_action: "Hearing is in the future; prepare to contest." };
+        }
+
+        const judgmentDt = parseDate(paidDate);
+        const appealDays = 10;
+        const withinAppeal =
+            judgmentDt ? (now.getTime() - judgmentDt.getTime()) / 86400000 <= appealDays && now >= judgmentDt : false;
+
+        if (guiltySignal && paidSignal && !withinAppeal) {
+            return { classification: "NOT DISPUTABLE" as const, recommended_action: "Closed (paid) and outside appeal window; focus on record/compliance." };
+        }
+        if (guiltySignal && withinAppeal) {
+            return { classification: "CONDITIONALLY DISPUTABLE" as const, recommended_action: "Possibly appealable—check deadline immediately." };
+        }
+        return { classification: "CONDITIONALLY DISPUTABLE" as const, recommended_action: "Needs review (missing or mixed signals)." };
+    };
+
+    const analyses: Array<{ classification: DisputeClassification; recommended_action: string }> = [];
+
+    if (r.source === "archive") {
+        const run = archiveRuns.find((x) => x.id === r.runId);
+        if (!run) return null;
+        const arr = run.dispute_analysis as unknown;
+        if (Array.isArray(arr)) {
+            const line = arr[r.lineIndex - 1] as Record<string, unknown> | undefined;
+            const cases = (line && (line.cases as unknown)) as unknown[] | undefined;
+            if (Array.isArray(cases)) {
+                for (const c of cases) {
+                    const a = (c as Record<string, unknown>)?.analysis as Record<string, unknown> | undefined;
+                    if (!a) continue;
+                    const cls = a.classification as DisputeClassification | undefined;
+                    if (!cls) continue;
+                    analyses.push({ classification: cls, recommended_action: (a.recommended_action as string | undefined) ?? "" });
+                }
+            }
+        }
+        // If archive has no stored analysis (older rows), fall back to computing from results payload.
+        if (analyses.length === 0) {
+            const item = resolveArchiveLineExportItem(r, archiveRuns);
+            const cases = item?.cases as unknown;
+            if (Array.isArray(cases)) {
+                for (const c of cases) {
+                    const tables = (c as Record<string, unknown>)?.tables as unknown;
+                    const t0 = Array.isArray(tables) ? (tables[0] as Record<string, unknown> | undefined) : undefined;
+                    const fields = (t0?.fields as unknown) as Field[] | undefined;
+                    if (Array.isArray(fields)) analyses.push(analyzeFields(fields));
+                }
+            }
+        }
+    } else if (r.source === "live") {
+        const line = liveJob?.lines_state?.find((l) => l.lineIndex === r.lineIndex) as Record<string, unknown> | undefined;
+        const ex = line?.export as Record<string, unknown> | undefined;
+        const cases = ex?.cases as unknown;
+        if (Array.isArray(cases)) {
+            for (const c of cases) {
+                const tables = (c as Record<string, unknown>)?.tables as unknown;
+                const t0 = Array.isArray(tables) ? (tables[0] as Record<string, unknown> | undefined) : undefined;
+                const fields = (t0?.fields as unknown) as Field[] | undefined;
+                if (Array.isArray(fields)) analyses.push(analyzeFields(fields));
+            }
+        }
+    }
+
     if (!analyses.length) return null;
 
     const hasDisputable = analyses.some((a) => (a?.classification as string | undefined) === "DISPUTABLE");
     if (hasDisputable) {
-        const a = analyses.find((x) => (x?.classification as string | undefined) === "DISPUTABLE")!;
+        const a = analyses.find((x) => x.classification === "DISPUTABLE")!;
         return {
             classification: "DISPUTABLE",
-            recommended_action: (a.recommended_action as string | undefined) ?? "",
+            recommended_action: a.recommended_action ?? "",
         };
     }
 
     const hasConditional = analyses.some(
-        (a) => (a?.classification as string | undefined) === "CONDITIONALLY DISPUTABLE",
+        (a) => a.classification === "CONDITIONALLY DISPUTABLE",
     );
     const allNot =
         analyses.length > 0 &&
-        analyses.every((a) => (a?.classification as string | undefined) === "NOT DISPUTABLE");
+        analyses.every((a) => a.classification === "NOT DISPUTABLE");
 
     // Per your rule:
     // - NOT DISPUTABLE if all cases are NOT DISPUTABLE
     // - CONDITIONALLY DISPUTABLE if at least one conditional and all others are NOT DISPUTABLE
     // - DISPUTABLE if at least one disputable (handled above)
     if (allNot) {
-        const a = analyses.find((x) => (x?.classification as string | undefined) === "NOT DISPUTABLE")!;
+        const a = analyses.find((x) => x.classification === "NOT DISPUTABLE")!;
         return {
             classification: "NOT DISPUTABLE",
-            recommended_action: (a.recommended_action as string | undefined) ?? "",
+            recommended_action: a.recommended_action ?? "",
         };
     }
 
@@ -143,10 +248,10 @@ function resolveLineDisputeSummary(
             return c === "CONDITIONALLY DISPUTABLE" || c === "NOT DISPUTABLE";
         });
         if (othersOk) {
-            const a = analyses.find((x) => (x?.classification as string | undefined) === "CONDITIONALLY DISPUTABLE")!;
+            const a = analyses.find((x) => x.classification === "CONDITIONALLY DISPUTABLE")!;
             return {
                 classification: "CONDITIONALLY DISPUTABLE",
-                recommended_action: (a.recommended_action as string | undefined) ?? "",
+                recommended_action: a.recommended_action ?? "",
             };
         }
     }
@@ -221,6 +326,7 @@ function ResultsSection({
     emptyHint,
     onRowClick,
     archiveRuns,
+    liveJob,
     hasMore,
     onEndReached,
 }: {
@@ -230,6 +336,7 @@ function ResultsSection({
     emptyHint: string;
     onRowClick: (r: ScrapeResultLineRow) => void;
     archiveRuns: WorkerScrapeRunArchive[];
+    liveJob: WorkerScrapeJobRow | null;
     hasMore: boolean;
     onEndReached: () => void;
 }) {
@@ -273,7 +380,7 @@ function ResultsSection({
                 case "detail":
                     return r.message ?? "";
                 case "dispute": {
-                    const s = resolveLineDisputeSummary(r, archiveRuns);
+                    const s = resolveLineDisputeSummary(r, archiveRuns, liveJob);
                     return s?.classification ?? "";
                 }
                 case "cases":
@@ -290,7 +397,7 @@ function ResultsSection({
             return String(av).localeCompare(String(bv)) * dir;
         });
         return copy;
-    }, [rows, sortKey, sortDir, archiveRuns]);
+    }, [rows, sortKey, sortDir, archiveRuns, liveJob]);
 
     const sentinelRef = React.useRef<HTMLDivElement | null>(null);
     React.useEffect(() => {
@@ -375,7 +482,7 @@ function ResultsSection({
                                 </TableCell>
                                 <TableCell className='max-w-[220px]'>
                                     {(() => {
-                                        const s = resolveLineDisputeSummary(r, archiveRuns);
+                                        const s = resolveLineDisputeSummary(r, archiveRuns, liveJob);
                                         if (!s) return <span className='text-muted-foreground'>—</span>;
                                         return (
                                             <div className='space-y-1'>
@@ -577,7 +684,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
 
     const rowToExportFields = React.useCallback(
         (r: ScrapeResultLineRow) => {
-            const dispute = resolveLineDisputeSummary(r, archiveRuns);
+            const dispute = resolveLineDisputeSummary(r, archiveRuns, liveJob);
             const issue = resolveLineIssueKind(r);
             const caseCount = resolveArchiveLineCaseCount(r, archiveRuns);
             return {
@@ -596,7 +703,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
             updatedAt: r.updatedAt,
             };
         },
-        [partitionNow, archiveRuns],
+        [partitionNow, archiveRuns, liveJob],
     );
 
     const exportCsv = React.useCallback(() => {
@@ -691,6 +798,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
                     emptyHint='No current activity. Start a scrape or wait for an archive row in the window below after a run completes.'
                     onRowClick={setDetailRow}
                     archiveRuns={archiveRuns}
+                    liveJob={liveJob}
                     hasMore={hasMoreCurrent}
                     onEndReached={onEndReachedCurrent}
                 />
@@ -701,6 +809,7 @@ export function HomeResultsTable({ focusJobId }: { focusJobId?: string | null } 
                     emptyHint='No older exports in view.'
                     onRowClick={setDetailRow}
                     archiveRuns={archiveRuns}
+                    liveJob={liveJob}
                     hasMore={hasMorePassed}
                     onEndReached={onEndReachedPassed}
                 />
